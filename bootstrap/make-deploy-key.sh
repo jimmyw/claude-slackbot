@@ -19,13 +19,23 @@
 # public half is printed.
 set -euo pipefail
 
+VERIFY_ONLY=false
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --verify|--verify-only) VERIFY_ONLY=true ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 VM_HOST="${1:-}"
 REPO_SLUG="${2:-}"
 GIT_HOST="${3:-github.com}"
 ADMIN_KEY="${ADMIN_KEY:-$HOME/.ssh/agent_vm_admin_ed25519}"
 
 if [[ -z "$VM_HOST" || -z "$REPO_SLUG" ]]; then
-    echo "usage: $0 <vm-ip> <owner/repo> [host]" >&2
+    echo "usage: $0 <vm-ip> <owner/repo> [host] [--verify]" >&2
     exit 64
 fi
 
@@ -42,6 +52,42 @@ KEY_PATH="/home/agent/.ssh/deploy_${SAFE_NAME}"
 
 SSH=(ssh -i "$ADMIN_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "admin@$VM_HOST")
+
+verify_key() {
+    echo "==> Testing the deploy key against $GIT_HOST"
+    # GitHub always exits non-zero for `ssh -T` (no shell access), so the exit
+    # code says nothing — the message is the signal.
+    local out
+    out=$("${SSH[@]}" "sudo -u agent -H ssh -o IdentitiesOnly=yes -o BatchMode=yes \
+        -o StrictHostKeyChecking=yes -i '$KEY_PATH' -T 'git@$ALIAS' 2>&1" || true)
+
+    case "$out" in
+        *"successfully authenticated"*)
+            echo "    $out"
+            echo
+            echo "Key works. Clone it with:"
+            echo "  ./bootstrap/add-repo.sh $VM_HOST git@$ALIAS:$REPO_SLUG.git $SAFE_NAME"
+            return 0
+            ;;
+        *"Permission denied"*)
+            echo "    $out" >&2
+            echo >&2
+            echo "The key is not registered on the repo yet (or was added to a" >&2
+            echo "different one — a deploy key only works for the repo it is on)." >&2
+            return 1
+            ;;
+        *)
+            echo "    $out" >&2
+            echo "    Unexpected response; the key may be fine but something else is off." >&2
+            return 1
+            ;;
+    esac
+}
+
+if [[ "$VERIFY_ONLY" == true ]]; then
+    verify_key
+    exit $?
+fi
 
 echo "==> Preparing the agent's ssh setup"
 "${SSH[@]}" "GIT_HOST='$GIT_HOST' ALIAS='$ALIAS' KEY_PATH='$KEY_PATH' \
@@ -110,9 +156,5 @@ echo
 echo "Then clone it with the alias (not plain github.com):"
 echo "  ./bootstrap/add-repo.sh $VM_HOST git@$ALIAS:$REPO_SLUG.git $SAFE_NAME"
 echo
-echo "To confirm the key works once you have added it:"
-echo "  ./bootstrap/make-deploy-key.sh $VM_HOST $REPO_SLUG --verify-only 2>/dev/null || true"
-echo "  ssh -i $ADMIN_KEY admin@$VM_HOST \\"
-echo "    \"sudo -u agent -H ssh -o IdentitiesOnly=yes -i $KEY_PATH -T git@$ALIAS\""
-echo "  (expect: 'Hi $REPO_SLUG! You've successfully authenticated, but GitHub"
-echo "   does not provide shell access.')"
+echo "Once you have added it on GitHub, confirm with:"
+echo "  ./bootstrap/make-deploy-key.sh $VM_HOST $REPO_SLUG --verify"
