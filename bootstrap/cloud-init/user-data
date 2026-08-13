@@ -97,6 +97,10 @@ runcmd:
   # safe.directory refuses. admin already has full sudo, so this grants it
   # nothing it lacked.
   - ["su", "-l", "admin", "-c", "git config --global --add safe.directory '*'"]
+  # Claude Code's Bash tool strips SSH_AUTH_SOCK, so git is told where the
+  # forwarded agent is instead of being expected to inherit it. agent-exec
+  # re-points that symlink at the start of every run.
+  - ["su", "-s", "/bin/bash", "agent", "-c", "git config --global core.sshCommand 'SSH_AUTH_SOCK=/home/agent/.ssh/agent.sock ssh'"]
   - ["rm", "-rf", "/var/lib/agent-provision"]
   - ["systemctl", "restart", "ssh"]
   # Leave a marker the host can check to confirm provisioning finished.

@@ -37,6 +37,27 @@ fi
 # The file lives only in the guest, mode 0600, agent-owned. It is deliberately
 # NOT passed in the job from the host: the VM is the isolation boundary and owns
 # its own credential, and this keeps the token out of the daemon's env and logs.
+# Claude Code sanitises the environment for its Bash tool: a command run through
+# it reports SSH_AUTH_SOCK as UNSET even though this script has it set. So the
+# forwarded agent is invisible to git unless we hand it over by another route.
+#
+# The route is a stable symlink plus git's core.sshCommand (set in the agent's
+# ~/.gitconfig), which names the symlink explicitly and so needs no environment.
+# sshd picks a fresh /tmp/ssh-XXXX/agent.NNN per session, hence re-pointing it on
+# every run.
+#
+# Concurrency note: two simultaneous runs share this one symlink, so the later run
+# wins. Harmless here because every run forwards the same single key.
+AGENT_SOCK_LINK="${AGENT_SOCK_LINK:-$HOME/.ssh/agent.sock}"
+if [[ -n "${SSH_AUTH_SOCK:-}" && -S "${SSH_AUTH_SOCK:-}" ]]; then
+    mkdir -p "$(dirname "$AGENT_SOCK_LINK")"
+    ln -sfn "$SSH_AUTH_SOCK" "$AGENT_SOCK_LINK"
+    log "forwarded agent linked at $AGENT_SOCK_LINK"
+else
+    rm -f "$AGENT_SOCK_LINK"
+    log "no forwarded ssh-agent this run; git cannot reach private repos"
+fi
+
 TOKEN_FILE="${AGENT_TOKEN_FILE:-$HOME/.config/claude-agent/token}"
 if [[ -r "$TOKEN_FILE" ]]; then
     CLAUDE_CODE_OAUTH_TOKEN="$(< "$TOKEN_FILE")"
