@@ -162,6 +162,12 @@ Checked against Claude Code 2.1.231 on terra:
   otherwise needs), so `30-install-vm-files.sh` ships files with `tar` over ssh.
   Its chown needs `sudo`, because cloud-init leaves root-owned markers such as
   `.provisioned` in /home/agent.
+- **`/home/agent` is `drwx------ agent:agent`**, so the `admin` account cannot
+  read or traverse it without sudo. Two consequences that both bit: anything
+  admin runs against Claude Code needs `sudo -u agent -H`, and an unprivileged
+  `stat` of paths under /home/agent returns *fewer lines* rather than an error —
+  which is how two files silently went unchecked in a green verifier run. Use
+  `sudo` and count what you checked.
 - **An ssh forced command gets a non-login shell**, whose PATH on Debian is
   exactly `/usr/local/bin:/usr/bin:/bin:/usr/games` — no `~/.local/bin`, which is
   where the Claude Code native installer puts the binary. `agent-exec` therefore

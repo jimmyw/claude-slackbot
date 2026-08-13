@@ -113,9 +113,13 @@ Wait for cloud-init (it installs Claude Code), lock down egress, then authentica
 ssh -i ~/.ssh/agent_vm_admin_ed25519 admin@<vm-ip> 'cloud-init status --wait'
 sudo ./bootstrap/20-nftables-egress.sh
 
-# From a real terminal (setup-token needs a TTY):
+# From a real terminal — setup-token needs a TTY, so this cannot be piped.
 ssh -t -i ~/.ssh/agent_vm_admin_ed25519 admin@<vm-ip>
-PATH=/home/agent/.local/bin:$PATH claude setup-token
+
+# Then, in that session, run it AS THE AGENT USER. /home/agent is drwx------
+# agent:agent, so admin cannot reach the binary at all — `claude` on admin's own
+# PATH is "command not found" no matter what you prepend. sudo keeps the TTY.
+sudo -u agent -H bash -c 'export PATH=$HOME/.local/bin:$PATH; claude setup-token'
 ```
 
 `setup-token` prints a token rather than writing a credentials file, and a forced
