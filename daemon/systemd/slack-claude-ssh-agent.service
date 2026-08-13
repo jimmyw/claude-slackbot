@@ -1,0 +1,32 @@
+[Unit]
+Description=ssh-agent holding the GitHub machine-user key for the agent VM
+Documentation=file:///home/tibber/slackbot/README.md
+# The daemon forwards this agent into the guest, so it must be up first.
+Before=slack-claude-daemon.service
+
+[Service]
+Type=exec
+# The socket lives in the daemon's state directory, not /tmp: both units set
+# PrivateTmp=yes, which gives each of them a *different* private /tmp, so a socket
+# there would be invisible to the daemon. This directory is the one path the
+# daemon's ProtectSystem=strict sandbox is granted write access to.
+Environment=SSH_AUTH_SOCK=/home/tibber/.local/share/slack-claude/ssh-agent.sock
+ExecStartPre=-/usr/bin/rm -f /home/tibber/.local/share/slack-claude/ssh-agent.sock
+ExecStart=/usr/bin/ssh-agent -D -a /home/tibber/.local/share/slack-claude/ssh-agent.sock
+# Load the key with its destination constraint once the socket exists.
+ExecStartPost=/home/tibber/slackbot/bootstrap/load-agent-key.sh
+Restart=always
+RestartSec=5
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tibber/.local/share/slack-claude
+
+StandardOutput=append:/home/tibber/.local/share/slack-claude/ssh-agent.log
+StandardError=append:/home/tibber/.local/share/slack-claude/ssh-agent.log
+SyslogIdentifier=slack-claude-ssh-agent
+
+[Install]
+WantedBy=default.target

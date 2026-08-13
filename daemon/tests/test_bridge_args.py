@@ -75,7 +75,7 @@ class FakeProcess:
         return None
 
 
-def make_config(tmp: Path) -> Config:
+def make_config(tmp: Path, forward_agent: bool = False) -> Config:
     key = tmp / "key"
     key.write_text("x")
     return Config(
@@ -83,6 +83,7 @@ def make_config(tmp: Path) -> Config:
         vm_host="10.9.9.9", vm_user="agent", vm_ssh_key=key,
         vm_domain="agent-vm", vm_workdir="/home/agent/work",
         libvirt_uri="qemu:///system",
+        forward_agent=forward_agent,
         approval_host="127.0.0.1", approval_port=9100, approval_timeout_s=600,
         tunnel_port_low=9101, tunnel_port_high=9199,
         db_path=tmp / "s.sqlite3", update_interval_s=0.0,
@@ -130,7 +131,24 @@ async def main() -> int:
             check("tunnel binds guest loopback only",
                   tunnel.startswith("127.0.0.1:"), tunnel)
 
-            print("\n[2] probe() argv")
+            print("\n[2] agent forwarding is opt-in and explicit")
+            check("forwarding OFF: no -A", "-A" not in argv, argv)
+            check("forwarding OFF: ForwardAgent=no stated, not left to default",
+                  "ForwardAgent=no" in argv, argv)
+
+            captured.clear()
+            fwd = Bridge(make_config(tmp, forward_agent=True))
+            async for _ in fwd.run(
+                prompt="hi", session_id="s", resume=False, run_token="t"
+            ):
+                pass
+            fargv = captured[0]
+            check("forwarding ON: -A present", "-A" in fargv, fargv)
+            check("forwarding ON: no contradicting ForwardAgent=no",
+                  "ForwardAgent=no" not in fargv, fargv)
+            check("forwarding ON: still no TTY", "-T" in fargv, fargv)
+
+            print("\n[3] probe() argv")
             captured.clear()
             await bridge.probe()
             argv = captured[0]
@@ -138,7 +156,7 @@ async def main() -> int:
                   "-F" in argv and "/dev/null" in argv, argv)
             check("probe does not request a tunnel", "-R" not in argv)
 
-            print("\n[3] tunnel ports are not shared between concurrent runs")
+            print("\n[4] tunnel ports are not shared between concurrent runs")
             pool = PortPool(9101, 9102)
             a = await pool.acquire()
             b = await pool.acquire()

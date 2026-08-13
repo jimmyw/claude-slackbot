@@ -1,7 +1,8 @@
 [Unit]
 Description=Slack-controlled Claude Code daemon
 Documentation=file:///home/tibber/slackbot/README.md
-After=network-online.target libvirtd.service
+After=network-online.target libvirtd.service slack-claude-ssh-agent.service
+Wants=slack-claude-ssh-agent.service
 Wants=network-online.target
 # StartLimit* belong in [Unit], not [Service] — systemd silently ignores them
 # under [Service] ("Unknown key ... ignoring"), so the crash-loop protection this
@@ -20,6 +21,9 @@ EnvironmentFile=-/home/tibber/slackbot/daemon/.env
 # Belt and braces: vmctl passes --connect explicitly, but a bare virsh run
 # from this unit would otherwise hit the empty qemu:///session instance.
 Environment=LIBVIRT_DEFAULT_URI=qemu:///system
+# The forwarded agent. Socket lives in the state dir rather than /tmp because
+# PrivateTmp gives each unit its own /tmp.
+Environment=SSH_AUTH_SOCK=/home/tibber/.local/share/slack-claude/ssh-agent.sock
 ExecStart=/home/tibber/slackbot/daemon/.venv/bin/python -m slackagent.app
 Restart=always
 RestartSec=5
