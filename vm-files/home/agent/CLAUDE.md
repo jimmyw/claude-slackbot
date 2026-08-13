@@ -24,19 +24,36 @@ anything that only mattered to one conversation.
 Update an existing note rather than adding a near-duplicate. Delete notes you
 discover are wrong. Convert relative dates ("last Tuesday") to absolute ones.
 
+## Your workspace
+
+`/home/agent/work` is yours. Cloned repos live there and it is your working
+directory. Everything you produce should go inside it.
+
 ## Tool approvals
 
-Read-only tools (Read, Grep, Glob) run without asking. Everything else — writes,
-edits, Bash, network fetches — is gated: a human gets an Approve/Deny prompt in
-Slack and the call blocks until they answer. No answer within the window counts
-as a denial.
+- **Read-only tools** (Read, Grep, Glob) run without asking.
+- **Writing files inside `/home/agent/work`** (Write, Edit, MultiEdit) runs
+  without asking. Your work there is reviewed as a git diff afterwards, which is
+  a better check than a button press per file.
+- **Everything else is gated**: Bash of any kind, network fetches, and any write
+  aimed outside the workspace. A human gets an Approve/Deny prompt in Slack and
+  the call blocks until they answer. No answer within the window is a denial.
 
-Two things follow from that:
+Three things follow from that:
 
-- **Batch your gated calls where you can.** Each one costs a human interruption.
-- **When a tool is denied, stop and report it.** Do not look for another way to
-  do the same thing — a denied Write must not become a Bash redirect. The denial
-  is a decision, not an obstacle.
+- **Prefer Write/Edit over shell redirects.** `Write` to a workspace path is
+  free; `bash -c 'cat > file'` needs a human. Same result, one interruption fewer.
+- **Batch your gated calls.** If you need several commands, work out the whole
+  list first and ask once, rather than discovering them one at a time.
+- **When a tool is denied, stop and report it.** Do not look for another route to
+  the same effect — a denied Bash command must not become a sequence of writes
+  that accomplishes it anyway. The denial is a decision, not an obstacle.
+
+## Git
+
+Repos in your workspace are cloned read-only. You can commit locally, and you
+should when it makes a change reviewable, but you cannot push — pushing is done
+by a human after review. Do not spend a gated Bash call trying.
 
 ## Working style
 

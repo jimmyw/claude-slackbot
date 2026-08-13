@@ -12,6 +12,12 @@
 #   1. the guest CAN reach the public internet (Anthropic API, git remotes)
 #   2. the guest CANNOT reach anything on the LAN, on any of the host's own
 #      addresses, or on the tailnet
+#
+# IMPORTANT: nftables cannot see inside WireGuard. If tailscaled runs in the
+# guest, the nftables policy is no longer the control for anything reachable over
+# the tailnet, and the ICMP probes below will pass while the guest can in fact
+# reach tailnet peers. Section [6] checks for exactly that, because a verifier
+# that reports green while the property is false is worse than no verifier.
 set -euo pipefail
 
 VM_HOST="${1:-}"
@@ -96,6 +102,23 @@ echo "[5] private ranges must be denied"
 for addr in 192.168.1.1 10.0.0.1 172.16.0.1 169.254.169.254; do
     report "private $addr icmp" down "$(probe_ping "$addr")"
 done
+
+echo "[6] the guest must not have an independent tunnel out"
+# WireGuard traffic leaves as UDP to a public endpoint (or DERP over 443), both of
+# which the egress policy permits — by design, since that is indistinguishable
+# from ordinary public egress. So a VPN inside the guest routes around LAN-deny
+# entirely, and no amount of nftables checking will notice.
+if command -v tailscale >/dev/null 2>&1 && sudo tailscale status >/dev/null 2>&1; then
+    peers=$(sudo tailscale status --peers 2>/dev/null | awk 'NF>1 {print $1}' | grep -c '^100\.' || echo 0)
+    printf '  FAIL  %-46s tailscaled is up with %s peers\n' "no independent tunnel out of the guest" "$peers"
+    echo "        The nftables policy does NOT contain tailnet traffic. Reachability"
+    echo "        is governed by your tailnet ACLs now, not by 20-nftables-egress.sh."
+    sudo tailscale status --peers 2>/dev/null | head -4 | sed 's/^/        /'
+    fail=$((fail+1))
+else
+    printf '  PASS  %-46s none found\n' "no independent tunnel out of the guest"
+    pass=$((pass+1))
+fi
 
 echo
 echo "passed=$pass failed=$fail"

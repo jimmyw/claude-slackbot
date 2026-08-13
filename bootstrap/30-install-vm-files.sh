@@ -63,15 +63,30 @@ tar -C "$REPO_DIR/vm-files" -cf - etc home usr \
 echo "==> Verifying the guest side"
 ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
     set -eu
-    # ~/.local/bin is not on PATH for a non-login shell, which is exactly the
-    # environment agent-exec runs in.
-    export PATH="$HOME/.local/bin:$PATH"
-    echo -n "  claude:           "; claude --version
-    echo -n "  agent-exec:       "; test -x /usr/local/bin/agent-exec && echo installed || echo MISSING
-    echo -n "  gate fail-closed: "
-    printf "{\"tool_name\":\"Write\",\"tool_input\":{}}" \
-        | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py \
-        | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
+
+    # As agent, not admin: /home/agent is drwx------ agent:agent, so admin cannot
+    # even see the CLI binary and this reports "command not found" for a healthy
+    # install. ~/.local/bin is also absent from a non-login PATH, which is exactly
+    # the environment agent-exec runs in.
+    echo -n "  claude:              "
+    sudo -u agent -H bash -c "export PATH=\$HOME/.local/bin:\$PATH; claude --version"
+
+    echo -n "  agent-exec:          "
+    test -x /usr/local/bin/agent-exec && echo installed || echo MISSING
+
+    gate() { # tool_name json_input -> allow|deny
+        printf "{\"tool_name\":\"%s\",\"tool_input\":%s}" "$1" "$2" \
+          | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py \
+          | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
+    }
+
+    # With no tunnel wired up, anything that needs a human must fail closed, and
+    # anything auto-allowed must still come back allow.
+    echo -n "  Read:                "; gate Read "{}"
+    echo -n "  Write in workspace:  "; gate Write "{\"file_path\":\"/home/agent/work/x.md\"}"
+    echo -n "  Write outside:       "; gate Write "{\"file_path\":\"/etc/passwd\"}"
+    echo -n "  Write via traversal: "; gate Write "{\"file_path\":\"/home/agent/work/../../etc/passwd\"}"
+    echo -n "  Bash in workspace:   "; gate Bash "{\"command\":\"ls /home/agent/work\"}"
 '
 
 echo
