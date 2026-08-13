@@ -26,6 +26,21 @@ log = logging.getLogger(__name__)
 _STREAM_LINE_LIMIT = 32 * 1024 * 1024
 
 
+# ssh is invoked with -F /dev/null throughout. Two reasons, one of them a hard
+# requirement:
+#
+#   * This runs as a `systemctl --user` unit, and any mount-namespace sandboxing
+#     there (ProtectSystem, ProtectHome, PrivateTmp) places the service in a user
+#     namespace where root-owned files appear as nobody:nobody. ssh validates the
+#     ownership of its config files and aborts with "Bad owner or permissions on
+#     /etc/ssh/ssh_config.d/...", exit 255, before ever opening a connection.
+#     Passing -F also makes ssh skip the system-wide config, which sidesteps it.
+#   * Independently: a daemon should not inherit ambient host ssh config. Every
+#     option it needs is passed explicitly below, so a stray ProxyCommand or
+#     Host * block in /etc/ssh/ssh_config cannot change its behaviour.
+_NO_SSH_CONFIG = ("-F", "/dev/null")
+
+
 class PortPool:
     """Hands out a distinct guest-side tunnel port per concurrent run.
 
@@ -83,6 +98,7 @@ class Bridge:
             command = [
                 "ssh",
                 "-T",
+                *_NO_SSH_CONFIG,
                 "-i",
                 str(cfg.vm_ssh_key),
                 "-o",
@@ -180,6 +196,7 @@ class Bridge:
         process = await asyncio.create_subprocess_exec(
             "ssh",
             "-T",
+            *_NO_SSH_CONFIG,
             "-i",
             str(cfg.vm_ssh_key),
             "-o",
