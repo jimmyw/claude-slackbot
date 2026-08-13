@@ -171,12 +171,49 @@ writes the mapping before the CLI starts, so the mapping is durable even if the
 first run dies. One `asyncio.Lock` per thread keeps two fast replies from
 resuming the same session concurrently.
 
-**Read-only tools run freely** — `Read`, `Grep`, `Glob`, `TodoWrite`,
-`NotebookRead`. Everything else, `Bash` very much included, waits for you.
+**Three tiers of approval.**
 
-`Bash` is deliberately *not* auto-allowed. A gate that blocks `Write` but allows
+1. **Read-only tools run freely** — `Read`, `Grep`, `Glob`, `TodoWrite`,
+   `NotebookRead`.
+2. **Writes inside `/home/agent/work` run freely** — `Write`, `Edit`,
+   `MultiEdit`, `NotebookEdit`. Documentation work is dozens of files, and a
+   button press each made it unusable; the git diff is the better review anyway.
+3. **Everything else waits for you** — `Bash` above all, network fetches, and any
+   write whose path resolves outside the workspace.
+
+`Bash` is deliberately never auto-allowed. A gate that blocks `Write` but allows
 `Bash` blocks nothing, since `bash -c 'echo > file'` does the same job — and in
 testing the model went looking for exactly that route when a `Write` was denied.
+
+Tier 2 uses `os.path.realpath`, so `work/../../etc/passwd` and a symlink planted
+at `work/escape -> /etc` both fall through to tier 3 rather than being treated as
+inside the workspace. `daemon/tests/test_hook_paths.py` covers those escapes with
+real symlinks, and `30-install-vm-files.sh` re-checks them in the guest on every
+push.
+
+## Working with repos
+
+```sh
+# Public repo:
+./bootstrap/add-repo.sh <vm-ip> https://github.com/owner/repo.git
+
+# Private repo, read-only:
+./bootstrap/make-deploy-key.sh <vm-ip> owner/repo   # prints a key to add on GitHub
+./bootstrap/add-repo.sh <vm-ip> git@github.com-repo:owner/repo.git repo
+```
+
+`add-repo.sh` clones **as the agent user**, which is the whole point: a clone made
+by `admin` or over your own Tailscale login leaves the tree owned by that user,
+and since `agent` has no sudo it then cannot write a single file. The symptom is
+the agent reporting permission errors on work it was just asked to do, over a
+clone that looks perfectly healthy. The script verifies ownership, writability,
+and that no file in the tree belongs to anyone else.
+
+One deploy key per repo — GitHub refuses to accept the same key on a second
+repository — so each gets an SSH `Host` alias and you clone via the alias.
+
+The agent can commit locally but cannot push: the deploy keys are read-only, and
+its `CLAUDE.md` tells it not to waste a gated call trying.
 
 **Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
 buttons; a click from anyone else gets an ephemeral refusal and leaves the

@@ -68,7 +68,17 @@ sessions.
 
 ## Still open
 
-- Which repos the agent should clone, and its git identity for pushes.
+- Whether the agent should ever push. Currently no: deploy keys are read-only and
+  the guest CLAUDE.md tells it not to try. Its git identity is set
+  (`agent-vm (Claude Code) <jimmy@tibber.com>`) so local commits are clean.
+- **Tailscale in the guest voids the egress guarantee.** As of 2026-08-13 the VM
+  is on the tailnet as `agent-vm` (100.76.114.102) and can reach `bigjimmy` via
+  DERP. nftables cannot see inside WireGuard, so `20-nftables-egress.sh` is no
+  longer the control for tailnet destinations — tailnet ACLs are. terra itself is
+  not a peer on that tailnet, so LAN-deny still holds for terra and 192.168.x.
+  `verify-egress.sh` now FAILS loudly when it finds tailscaled running rather
+  than reporting a green it cannot justify. Decide whether to restrict `agent-vm`
+  with tailnet ACLs or to accept the tailnet as the boundary.
 - Whether to tighten egress from the current LAN-deny baseline to a
   CONNECT-proxy hostname allowlist (see README, "Hardening").
 - Scoped session-level approval grants ("approve Edit in this thread for
@@ -202,7 +212,13 @@ Checked against Claude Code 2.1.231 on terra:
   `install -d -o agent -g agent -m 0700` for each directory level, and verify
   with `sudo -u agent test -r` rather than by reading the file's own mode.
 - **`/home/agent` is `drwx------ agent:agent`**, so the `admin` account cannot
-  read or traverse it without sudo. Two consequences that both bit: anything
+  read or traverse it without sudo. **This has now caused five separate bugs** —
+  in the verifier's stat, the setup-token instructions, the token-install probe,
+  add-repo's existence check, and 30-install's verification block. When writing
+  anything that runs over the admin key: every filesystem test, stat, find or
+  `claude` invocation touching /home/agent needs `sudo` or `sudo -u agent -H`.
+  Bare `[ -e ]` and `stat` do not error — they report "absent", which reads as a
+  legitimate result and silently skips the check. Two consequences that both bit: anything
   admin runs against Claude Code needs `sudo -u agent -H`, and an unprivileged
   `stat` of paths under /home/agent returns *fewer lines* rather than an error —
   which is how two files silently went unchecked in a green verifier run. Use
