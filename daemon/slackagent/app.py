@@ -59,6 +59,7 @@ class Daemon:
 
         @app.event("app_mention")
         async def on_mention(event, say):  # noqa: ANN001
+            log.info("app_mention in channel=%s", event.get("channel"))
             await self._on_message(event, is_mention=True)
 
         @app.event("message")
@@ -68,12 +69,22 @@ class Daemon:
             # silently dropped: the only event that arrives is app_home_opened and
             # the bot appears dead in its own DM.
             if event.get("channel_type") == "im":
+                log.info("direct message from user=%s", event.get("user"))
                 await self._on_message(event, is_mention=True)
                 return
 
             # In a channel, only threaded replies. A bare message that does not
             # mention the bot and is not in a known thread is none of our business.
             if event.get("thread_ts") is None:
+                # Logged because "the bot is silent" is otherwise indistinguishable
+                # from "the event never arrived", and those have completely
+                # different causes. An event Slack does not deliver at all (missing
+                # subscription) leaves no line here either — which is itself the
+                # answer.
+                log.info(
+                    "ignoring channel message with no thread_ts (channel=%s type=%s)",
+                    event.get("channel"), event.get("channel_type"),
+                )
                 return
             # A mention inside a thread fires BOTH app_mention and message.
             # app_mention already owns it; handling it here too would run the
@@ -131,6 +142,10 @@ class Daemon:
                 self._store.find_session, channel, thread_ts
             )
             if known is None:
+                log.info(
+                    "ignoring reply in a thread we do not own (channel=%s thread=%s)",
+                    channel, thread_ts,
+                )
                 return
 
         if user != self._config.authorized_user:
