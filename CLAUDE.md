@@ -133,6 +133,18 @@ Checked against Claude Code 2.1.231 on terra:
   `owner: agent:agent` on a write_files entry fails on a first boot. Files are
   staged root-owned under `/var/lib/agent-provision` and installed into place by
   a late `runcmd` instead.
+- **`claude setup-token` hands back a token to export, not a credentials file.**
+  It prints a `sk-ant-oat…` value for `CLAUDE_CODE_OAUTH_TOKEN`. Since a forced
+  command reads neither ~/.bashrc nor ~/.profile, an exported variable never
+  reaches agent-exec — it sources `~/.config/claude-agent/token` (0600,
+  agent-owned) instead. `install-vm-token.sh` writes it with echo off, straight
+  into the guest, so the value never lands on the host or in shell history. The
+  token deliberately does NOT travel in the job from the host: the VM is the
+  isolation boundary and owns its own credential.
+- The guest has **no rsync** (and adding it would be a package the agent never
+  otherwise needs), so `30-install-vm-files.sh` ships files with `tar` over ssh.
+  Its chown needs `sudo`, because cloud-init leaves root-owned markers such as
+  `.provisioned` in /home/agent.
 - **An ssh forced command gets a non-login shell**, whose PATH on Debian is
   exactly `/usr/local/bin:/usr/bin:/bin:/usr/games` — no `~/.local/bin`, which is
   where the Claude Code native installer puts the binary. `agent-exec` therefore
