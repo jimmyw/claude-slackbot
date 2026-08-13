@@ -85,6 +85,25 @@ sessions.
   10 minutes") to cut button fatigue. The `approvals` schema already
   accommodates it; deliberately not built for v1.
 
+## Operational gaps found the hard way
+
+- **There is no out-of-band way into the guest.** Both accounts have
+  `lock_passwd: true`, so `virsh console` cannot log in. When sshd stopped
+  serving (see below) the VM was pingable, idle, and completely unreachable.
+  Nothing has been done about this yet; a console password for `admin` or a
+  serial getty would be the fix.
+- **Rapid ssh retries wedge sshd.** Each abandoned connection holds an
+  unauthenticated slot for `LoginGraceTime` (120s default) and `MaxStartups` is
+  `10:30:100`, so a burst of timed-out attempts makes *every* new connection
+  accept the TCP handshake and then send no banner. Diagnosing by retrying makes
+  it strictly worse. If TCP connects but no banner arrives: stop, wait two
+  minutes, then try once.
+- **`add-repo.sh` hung once at ssh session establishment** and could not be
+  reproduced afterwards: the same clone via the same heredoc form completed in
+  2.3s, and the guest was at 0% CPU with 3.7GB free during the hang. The failure
+  was in getting an ssh session, not in git. Root cause unconfirmed; the retry
+  storm above then sustained it for several minutes.
+
 ## Verified behaviour (don't re-derive these)
 
 Checked against Claude Code 2.1.231 on terra:
@@ -211,7 +230,21 @@ Checked against Claude Code 2.1.231 on terra:
   Slack as a bare "Not logged in" with no clue why. Use
   `install -d -o agent -g agent -m 0700` for each directory level, and verify
   with `sudo -u agent test -r` rather than by reading the file's own mode.
-- **`/home/agent` is `drwx------ agent:agent`**, so the `admin` account cannot
+- **Uninitialised submodules are EMPTY directories, not absent ones.** A clone
+  without `--recurse-submodules` leaves real-looking but contentless components,
+  so the agent reads the tree as complete and documents it wrongly — silently.
+  `add-repo.sh` now counts them and warns with the list of repos required.
+  `tibber-pulse-ir-hub-esp32` has 6 submodules across 6 distinct private repos.
+- **Deploy keys do not scale to submodules.** GitHub allows one deploy key per
+  repo, so an N-submodule tree needs N+1 keys *plus* `url.insteadOf` rewriting to
+  map each `git@github.com:tibber/X` to the right Host alias. A single credential
+  with read access to all of them (fine-grained PAT, or a machine user) is the
+  right tool once submodules are involved.
+- **`/home/agent` was `drwx------ agent:agent`** and is now `0711` with `work/` at
+  `0755`, so the workspace is browsable over Tailscale without sudo. `.ssh`,
+  `.config/claude-agent` and `.claude` keep `0700` and the token stays `0600` —
+  verified by attempting to read it as `admin`, not by inspecting modes.
+- **`/home/agent` traversal**, so the `admin` account cannot
   read or traverse it without sudo. **This has now caused five separate bugs** —
   in the verifier's stat, the setup-token instructions, the token-install probe,
   add-repo's existence check, and 30-install's verification block. When writing

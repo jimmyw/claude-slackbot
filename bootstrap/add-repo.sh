@@ -12,6 +12,16 @@
 # The agent's cwd is /home/agent/work, so anything cloned here is what it sees.
 set -euo pipefail
 
+WITH_SUBMODULES=false
+ARGS=()
+for arg in "$@"; do
+    case "$arg" in
+        --submodules) WITH_SUBMODULES=true ;;
+        *) ARGS+=("$arg") ;;
+    esac
+done
+set -- "${ARGS[@]+"${ARGS[@]}"}"
+
 VM_HOST="${1:-}"
 GIT_URL="${2:-}"
 DIR_NAME="${3:-}"
@@ -19,7 +29,7 @@ ADMIN_KEY="${ADMIN_KEY:-$HOME/.ssh/agent_vm_admin_ed25519}"
 WORKDIR=/home/agent/work
 
 if [[ -z "$VM_HOST" || -z "$GIT_URL" ]]; then
-    echo "usage: $0 <vm-ip> <git-url> [directory-name]" >&2
+    echo "usage: $0 <vm-ip> <git-url> [directory-name] [--submodules]" >&2
     exit 64
 fi
 
@@ -31,7 +41,8 @@ SSH=(ssh -i "$ADMIN_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "admin@$VM_HOST")
 
 echo "==> Cloning $GIT_URL as the agent user"
-"${SSH[@]}" "GIT_URL='$GIT_URL' DIR_NAME='$DIR_NAME' WORKDIR='$WORKDIR' bash -s" <<'REMOTE'
+"${SSH[@]}" "GIT_URL='$GIT_URL' DIR_NAME='$DIR_NAME' WORKDIR='$WORKDIR' \
+    WITH_SUBMODULES='$WITH_SUBMODULES' bash -s" <<'REMOTE'
 set -eu
 
 # sudo test, not [ -e ]: admin cannot traverse /home/agent, so a bare test
@@ -49,6 +60,13 @@ fi
 # one unreadable line. Failures still go to stderr.
 sudo -u agent -H git clone --quiet "$GIT_URL" "$WORKDIR/$DIR_NAME"
 echo "    cloned $(sudo -u agent -H git -C "$WORKDIR/$DIR_NAME" rev-list --count HEAD) commits"
+
+if [ "$WITH_SUBMODULES" = true ]; then
+    echo "    initialising submodules"
+    sudo -u agent -H git -C "$WORKDIR/$DIR_NAME" \
+        submodule update --init --recursive --quiet \
+      || echo "    SUBMODULES FAILED — each is a separate repo needing its own read access"
+fi
 REMOTE
 
 echo
@@ -79,6 +97,32 @@ if [ -z "$foreign" ]; then
     echo "  PASS  no files in the tree owned by anyone else"
 else
     echo "  FAIL  not owned by agent: $foreign"; fail=1
+fi
+
+if sudo test -f "$DIR/.gitmodules"; then
+    total=$(sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | wc -l)
+    missing=0
+    while read -r path; do
+        [ -z "$path" ] && continue
+        # An uninitialised submodule is an EMPTY directory, not an absent one, so
+        # the agent sees a real-looking but contentless component and will happily
+        # document it as such. Count them explicitly.
+        if [ -z "$(sudo ls -A "$DIR/$path" 2>/dev/null)" ]; then
+            missing=$((missing + 1))
+        fi
+    done <<< "$(sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}')"
+
+    if [ "$missing" -gt 0 ]; then
+        echo "  WARN  $missing of $total submodules are EMPTY directories"
+        echo "        The agent will read this tree as complete and document it"
+        echo "        wrongly. Each submodule is a separate private repo and needs"
+        echo "        its own read access; re-run with --submodules once that is in"
+        echo "        place. Repos required:"
+        sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.url' \
+          | awk '{print "          " $2}' | sort -u
+    else
+        echo "  PASS  all $total submodules populated"
+    fi
 fi
 
 if sudo -u agent -H git -C "$DIR" status --short >/dev/null 2>&1; then
