@@ -112,6 +112,16 @@ async def test_error_paths() -> None:
                            "result": "session limit reached", "duration_ms": 1200})
     check("run error surfaces to the user", "session limit reached" in slack.updates[-1]["text"])
 
+    # Captured from a real unauthenticated run through the SSH bridge. Note its
+    # subtype is "success" even though is_error is true, so keying off subtype
+    # alone would show the user a blank reply.
+    slack, _ = await replay("not_logged_in.jsonl")
+    final = slack.updates[-1]
+    check("unauthenticated run tells the user to log in",
+          "Not logged in" in final["text"], final["text"][:120])
+    check("and is marked as a warning", ":warning:" in final["text"],
+          final["text"][:120])
+
     slack = FakeSlack()
     renderer = SlackRenderer(slack, "C1", "1.1", update_interval_s=0.0)
     await renderer.start()
