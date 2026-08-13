@@ -115,6 +115,11 @@ class Bridge:
                 "ServerAliveCountMax=4",
                 "-o",
                 "ExitOnForwardFailure=yes",
+                # Agent forwarding lets the guest clone private repos without any
+                # credential of its own. The key stays in the host's ssh-agent and
+                # is destination-constrained to git@github.com via this hop, so a
+                # compromised guest can neither steal it nor aim it elsewhere.
+                *(("-A",) if cfg.forward_agent else ("-o", "ForwardAgent=no")),
                 "-R",
                 f"127.0.0.1:{port}:{cfg.approval_host}:{cfg.approval_port}",
                 f"{cfg.vm_user}@{cfg.vm_host}",

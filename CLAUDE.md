@@ -230,6 +230,19 @@ Checked against Claude Code 2.1.231 on terra:
   Slack as a bare "Not logged in" with no clue why. Use
   `install -d -o agent -g agent -m 0700` for each directory level, and verify
   with `sudo -u agent test -r` rather than by reading the file's own mode.
+- **`sudo rm /dir/*` expands the glob as the CALLING user.** On a 0700 directory
+  the caller cannot list it, so rm receives a literal `*`, and `-f` swallows the
+  failure — the command reports success and deletes nothing. Use
+  `sudo sh -c "rm -f /dir/*"` so root does the expansion. Same trap as every other
+  identity bug here, wearing a different hat.
+- **`ssh-add -h` rejects a user on the "from" hop.** The constraint is
+  `<vm-host>>git@github.com`, not `agent@<vm-host>>git@github.com`; the latter
+  fails with "cannot specify user on 'from' host" because the agent cannot verify
+  the user at that point. Constraints also need `-H <known_hosts>` covering every
+  hop, or ssh-add refuses to add the key at all.
+- **A failing `ExecStartPost` tears down the main process.** ssh-agent looked like
+  it was exiting 2 on its own; it was systemd killing it because load-agent-key.sh
+  had failed. Read the *whole* status block, not just the ExecStart line.
 - **`sudo git` in an agent-owned repo returns EMPTY, not an error.** git's
   `safe.directory` protection refuses a repo owned by another user, and
   `git config --get` then yields an empty string rather than failing visibly. A

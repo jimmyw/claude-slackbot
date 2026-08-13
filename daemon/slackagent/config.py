@@ -45,6 +45,7 @@ class Config:
     vm_domain: str
     vm_workdir: str
     libvirt_uri: str
+    forward_agent: bool
 
     # Approval gate
     approval_host: str
@@ -77,6 +78,10 @@ class Config:
             # NOT the default URI: for an unprivileged user that resolves to
             # qemu:///session, a separate and empty hypervisor instance.
             libvirt_uri=os.environ.get("LIBVIRT_URI", "qemu:///system"),
+            # Off unless explicitly enabled: forwarding an agent into the
+            # guest is a real grant, not a default.
+            forward_agent=os.environ.get("FORWARD_AGENT", "").strip().lower()
+            in {"1", "true", "yes"},
             approval_host=os.environ.get("APPROVAL_HOST", "127.0.0.1"),
             approval_port=_int("APPROVAL_PORT", 9100),
             approval_timeout_s=_int("APPROVAL_TIMEOUT_S", 600),
