@@ -252,7 +252,12 @@ class Daemon:
         ]
         for g in grants:
             used = f"{g.use_count} use{'s' if g.use_count != 1 else ''}"
-            scope = "any use" if g.pattern == "*" else f"`{g.pattern}`"
+            if g.match_type == "any":
+                scope = "any use"
+            elif g.match_type == "exact":
+                scope = f"exactly `{g.pattern}`"
+            else:
+                scope = f"`{g.pattern}` and below"
             lines.append(f"  `{g.id}`  {g.tool_name}: {scope}  ({used})")
         lines.append("`revoke <id>` to remove one, `revoke all` to clear them.")
         await self._app.client.chat_postMessage(

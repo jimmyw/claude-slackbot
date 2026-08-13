@@ -113,10 +113,23 @@ sessions.
 - Grants are `(tool_name, prefix)` in the daemon's sqlite **on the host**, so the
   guest can only ask; it cannot grant itself anything. The check happens in
   `ApprovalService._handle_approve` before any Slack message is posted.
-- A prefix grant is only meaningful because `grants.is_grantable` refuses any Bash
-  command containing `;  &  |  ` + "`" + `  $(  >  <  newline  \\`. Without that,
-  granting `git status` authorises `git status; rm -rf ~`. `matches` re-checks it,
-  so a grant made for a simple command can never cover a compound one.
+- Three match types: `prefix`, `exact`, `any`. The first version had only prefix,
+  and refused any command containing a shell metacharacter — which in practice
+  meant almost every real Bash call got no button at all, since agents constantly
+  use `&&`, `|` and `>`. MCP tools got grants and the actual source of clicks did
+  not.
+- Compound commands are now segmented (quote-aware) and every segment must be
+  covered independently, so granting `cd` and `npm test` covers
+  `cd /x && npm test` while granting only `cd` does not cover `cd /x; rm -rf ~`.
+  A mis-split can only add an uncovered segment, i.e. it fails towards asking.
+- `exact` exists so that commands containing substitution or redirection are
+  grantable at all: nothing can be appended to widen an exact match.
+- Three classes are never offered as a prefix: substitution/redirection/newline,
+  interpreters (`sh`, `python3`, `xargs`, `sudo`, `make`), and destructive commands
+  (`rm`, `chmod`, `mv`, `systemctl`, `curl`, …). The destructive list exists
+  because segmenting `git status; rm -rf /home/agent` would otherwise offer
+  "Always allow: git status, rm" and one careless click would auto-approve every
+  future `rm`.
 - The word boundary is the second half: `git status` must not match
   `git statusfoo`. Match is exact-equal or prefix followed by a space.
 - Tools with no subject field (`ToolSearch`, `mcp__*`, `TodoWrite`) get

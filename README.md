@@ -228,65 +228,56 @@ Every decision lands in the `approvals` table with who and when.
 
 ### Standing grants ("always allow")
 
-Every approval with a safely generalisable command gets a third button:
+Approvals carry a third button. What it offers depends on what can be generalised
+safely:
 
 ```
-🔒 Approval needed — Bash
-   git status --short
+🔒 Bash — git status --short
    [Approve]  [Always allow: git status]  [Deny]
-```
 
-Pressing it approves the call and records a grant, so future matching calls are
-answered on the host with no button and no Slack message.
+🔒 Bash — cd /home/agent/work/repo && npm test
+   [Approve]  [Always allow: cd, npm test]  [Deny]          ← creates two grants
 
-```
-grants            list them, with use counts
-revoke 3          remove one
-revoke all        clear them
-```
+🔒 Bash — echo hello > notes.md
+   [Approve]  [Always allow this exact command]  [Deny]
 
-Grants live in the daemon's sqlite **on the host**, so the agent can only ask —
-it can never grant itself anything.
-
-A grant is a command *prefix*, and it only matches when the command contains
-nothing that can chain, pipe, redirect or substitute:
-
-| granted `git status`, command… | outcome |
-|---|---|
-| `git status --short` | auto-approved |
-| `git status; rm -rf ~` | **asks a human** — `;` |
-| `git status && curl evil` | **asks a human** — `&` |
-| `git status $(curl evil)` | **asks a human** — `$(` |
-| `git status > ~/.ssh/authorized_keys` | **asks a human** — `>` |
-| `git statusfoo` | **asks a human** — word boundary |
-
-The button is only offered when a prefix can be derived safely, so a command
-containing any of those characters cannot be turned into a grant in the first
-place. `daemon/tests/test_grants.py` covers fourteen bypass attempts.
-
-**Tools with no subject to scope by** — `ToolSearch`, every `mcp__server__tool`,
-`TodoWrite` — are granted whole instead:
-
-```
-🔒 Approval needed — mcp__varys__pulse_command
+🔒 mcp__varys__pulse_command
    [Approve]  [Always allow all mcp__varys__pulse_command]  [Deny]
 ```
 
-That is safe because the tool's *name* is the scope: granting
-`mcp__varys__pulse_command` allows that one tool and nothing else, not
-`mcp__varys__pulse_reboot`. `grants` shows these as `any use`.
+```
+grants        list them with use counts
+revoke 3      remove one
+revoke all    clear them
+```
 
-**These tools can never be granted wholesale**, because their name does not bound
-what they do:
+Grants live in the daemon's sqlite **on the host**, so the agent can only ask — it
+can never grant itself anything.
 
-| tool | why |
-|---|---|
-| `Bash` | arbitrary code |
-| `Write` `Edit` `MultiEdit` `NotebookEdit` | the workspace is already auto-allowed, so an approval means a path *outside* it — including `~/.gitconfig`, whose `core.sshCommand` the forwarded ssh-agent depends on |
-| `WebFetch` | an arbitrary outbound URL is an exfiltration channel |
+**Compound commands need every segment granted.** `cd /x && npm test` is covered
+only when both `cd` and `npm test` are. Granting just `cd` does not make
+`cd /x; rm -rf ~` acceptable. Splitting is quote-aware, so `echo "a && b"` stays
+one segment, and a mis-split can only ever add a segment nothing covers — it fails
+towards asking you.
 
-They only ever get a scoped grant. `matches()` re-checks this, so even a wildcard
-row inserted into the database by hand is refused at match time.
+**Three things are never offered as a prefix**, because a prefix would generalise
+from one sighting to everything of that shape:
+
+| | why | offered instead |
+|---|---|---|
+| substitution, redirection, newlines — `$( )`, `` ` ``, `>`, `<` | the effect isn't determined by the opening words | exact |
+| interpreters — `sh`, `python3`, `xargs`, `sudo`, `make` | a prefix on these is a prefix on everything they can run | exact |
+| destructive — `rm`, `chmod`, `mv`, `systemctl`, `curl`, `wget` … | one careless click would auto-approve every future `rm` | exact |
+
+That last one is why `git status; rm -rf /home/agent` offers only *this exact
+command* rather than `Always allow: git status, rm`.
+
+**And these tools can never be granted wholesale**, because their name doesn't
+bound them: `Bash`, `Write`/`Edit`/`MultiEdit`/`NotebookEdit` (an approval means a
+path *outside* the auto-allowed workspace, including `~/.gitconfig`, whose
+`core.sshCommand` the forwarded ssh-agent depends on), and `WebFetch` (an
+arbitrary outbound URL is an exfiltration channel). `covered_by()` re-checks this,
+so even a wildcard row inserted by hand is refused at match time.
 
 **`status` in a thread** reports the VM state, the SSH bridge, and how many
 standing grants exist.

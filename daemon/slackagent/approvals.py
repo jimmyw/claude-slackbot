@@ -25,7 +25,7 @@ from typing import Any
 from aiohttp import web
 
 from .config import Config
-from .grants import ANY, suggest_pattern
+from .grants import MATCH_ANY, MATCH_EXACT, suggest
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -58,6 +58,10 @@ class ApprovalService:
         self._slack = slack_client
         self._runs: dict[str, PendingRun] = {}
         self._waiters: dict[str, asyncio.Future[Verdict]] = {}
+        # A Slack button value is limited and a compound command can suggest
+        # several patterns, so the suggestion stays here rather than riding in the
+        # payload the browser hands back.
+        self._suggestions: dict[str, Any] = {}
         self._runner: web.AppRunner | None = None
 
     # -- run registration ---------------------------------------------------
@@ -125,14 +129,14 @@ class ApprovalService:
         # An existing grant answers without a button. Checked here, on the host:
         # the guest only ever asks, so it cannot grant itself anything.
         granted = await asyncio.to_thread(self._store.find_grant, tool_name, tool_input)
-        if granted is not None:
-            log.info(
-                "auto-approved %s by grant #%s (%r)",
-                tool_name, granted.id, granted.pattern,
-            )
+        if granted:
+            # A list: a compound command needs one grant per segment, and naming
+            # them all is what makes an auto-approval auditable after the fact.
+            names = ", ".join(f"#{x.id} {x.pattern}" for x in granted)
+            log.info("auto-approved %s by grant(s) %s", tool_name, names)
             return web.json_response({
                 "approved": True,
-                "reason": f"covered by grant #{granted.id}: {granted.pattern}",
+                "reason": f"covered by grant(s) {names}",
             })
 
         approval_id = uuid.uuid4().hex
@@ -153,12 +157,14 @@ class ApprovalService:
         run.approval_ids.add(approval_id)
 
         try:
-            pattern = suggest_pattern(tool_name, tool_input)
+            hint = suggest(tool_name, tool_input)
+            if hint is not None:
+                self._suggestions[approval_id] = hint
             posted = await self._slack.chat_postMessage(
                 channel=run.channel_id,
                 thread_ts=run.thread_ts,
                 text=f"Approval needed: {tool_name}",
-                blocks=_approval_blocks(approval_id, tool_name, tool_input, pattern),
+                blocks=_approval_blocks(approval_id, tool_name, tool_input, hint),
             )
             message_ts = posted["ts"]
             await asyncio.to_thread(
@@ -192,6 +198,7 @@ class ApprovalService:
             )
         finally:
             self._waiters.pop(approval_id, None)
+            self._suggestions.pop(approval_id, None)
             run.approval_ids.discard(approval_id)
 
         return web.json_response(
@@ -207,11 +214,8 @@ class ApprovalService:
         visible only to the clicker.
         """
         clicker = (body.get("user") or {}).get("id")
-        raw = action.get("value") or ""
+        approval_id = action.get("value") or ""
         action_id = action.get("action_id")
-        # The "always" button carries the pattern after the approval id, since a
-        # Slack button value is the only state it can hand back.
-        approval_id, _, pattern = raw.partition("|")
         approve = action_id in (ACTION_APPROVE, ACTION_ALWAYS)
 
         # THE access control. Everything else in this file is bookkeeping.
@@ -252,13 +256,20 @@ class ApprovalService:
             )
             return
 
-        if action_id == ACTION_ALWAYS and pattern:
-            grant_id = await asyncio.to_thread(
-                self._store.add_grant, row["tool_name"], pattern, clicker
-            )
+        created: list[str] = []
+        hint = self._suggestions.get(approval_id)
+        if action_id == ACTION_ALWAYS and hint is not None:
+            # One press may create several grants: `cd x && npm test` needs both
+            # `cd` and `npm test` before that command is covered.
+            for pattern in hint.patterns:
+                grant_id = await asyncio.to_thread(
+                    self._store.add_grant,
+                    row["tool_name"], pattern, clicker, hint.match_type,
+                )
+                created.append(f"#{grant_id} {pattern}")
             log.info(
-                "grant #%s created by %s: %s %r",
-                grant_id, clicker, row["tool_name"], pattern,
+                "grants created by %s for %s (%s): %s",
+                clicker, row["tool_name"], hint.match_type, ", ".join(created),
             )
 
         future = self._waiters.get(approval_id)
@@ -302,8 +313,16 @@ class ApprovalService:
             log.exception("could not update the approval message")
 
 
+def _granted_suffix(tool_name: str, hint: Any) -> str:
+    if hint.match_type == MATCH_ANY:
+        return f" — always allowing all `{tool_name}`"
+    if hint.match_type == MATCH_EXACT:
+        return " — always allowing that exact command"
+    return " — always allowing " + ", ".join(f"`{p}`" for p in hint.patterns)
+
+
 def _approval_blocks(
-    approval_id: str, tool_name: str, tool_input: Any, pattern: str | None = None
+    approval_id: str, tool_name: str, tool_input: Any, hint: Any = None
 ) -> list[dict]:
     return [
         {
@@ -333,20 +352,14 @@ def _approval_blocks(
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                # "Always allow: *" tells the operator nothing; name
-                                # the tool instead. Truncated because Slack rejects
-                                # button text over 75 characters.
-                                "text": (
-                                    f"Always allow all {tool_name}"
-                                    if pattern == ANY
-                                    else f"Always allow: {pattern}"
-                                )[:75],
+                                # Truncated: Slack rejects button text over 75 chars.
+                                "text": _always_label(tool_name, hint)[:75],
                             },
                             "action_id": ACTION_ALWAYS,
-                            "value": f"{approval_id}|{pattern}",
+                            "value": approval_id,
                         }
                     ]
-                    if pattern
+                    if hint is not None
                     else []
                 ),
                 {
@@ -359,6 +372,14 @@ def _approval_blocks(
             ],
         },
     ]
+
+
+def _always_label(tool_name: str, hint: Any) -> str:
+    if hint.match_type == MATCH_ANY:
+        return f"Always allow all {tool_name}"
+    if hint.match_type == MATCH_EXACT:
+        return "Always allow this exact command"
+    return "Always allow: " + ", ".join(hint.patterns)
 
 
 def _format_input(tool_input: Any, limit: int = 2500) -> str:

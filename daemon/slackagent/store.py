@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from .grants import Grant, matches
+from .grants import Grant, covered_by
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -51,11 +51,15 @@ CREATE TABLE IF NOT EXISTS grants (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     tool_name    TEXT    NOT NULL,
     pattern      TEXT    NOT NULL,
+    -- 'prefix' | 'exact' | 'any'. See grants.py; the type decides how much a
+    -- pattern generalises, which is the whole safety question.
+    match_type   TEXT    NOT NULL DEFAULT 'prefix'
+        CHECK (match_type IN ('prefix', 'exact', 'any')),
     created_at   INTEGER NOT NULL,
     created_by   TEXT    NOT NULL,
     use_count    INTEGER NOT NULL DEFAULT 0,
     last_used_at INTEGER,
-    UNIQUE (tool_name, pattern)
+    UNIQUE (tool_name, pattern, match_type)
 );
 """
 
@@ -159,20 +163,25 @@ class Store:
 
     # -- grants -------------------------------------------------------------
 
-    def add_grant(self, tool_name: str, pattern: str, created_by: str) -> int:
+    def add_grant(
+        self, tool_name: str, pattern: str, created_by: str,
+        match_type: str = "prefix",
+    ) -> int:
         """Create a grant, or return the existing one's id. Idempotent."""
         now = int(time.time())
         with self._lock:
             row = self._db.execute(
-                "SELECT id FROM grants WHERE tool_name = ? AND pattern = ?",
-                (tool_name, pattern),
+                "SELECT id FROM grants "
+                "WHERE tool_name = ? AND pattern = ? AND match_type = ?",
+                (tool_name, pattern, match_type),
             ).fetchone()
             if row is not None:
                 return int(row["id"])
             cursor = self._db.execute(
-                "INSERT INTO grants (tool_name, pattern, created_at, created_by) "
-                "VALUES (?, ?, ?, ?)",
-                (tool_name, pattern, now, created_by),
+                "INSERT INTO grants "
+                "(tool_name, pattern, match_type, created_at, created_by) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (tool_name, pattern, match_type, now, created_by),
             )
             self._db.commit()
             return int(cursor.lastrowid or 0)
@@ -180,36 +189,39 @@ class Store:
     def list_grants(self) -> list[Grant]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, tool_name, pattern, created_by, created_at, use_count "
-                "FROM grants ORDER BY tool_name, pattern"
+                "SELECT id, tool_name, pattern, match_type, created_by, "
+                "created_at, use_count FROM grants ORDER BY tool_name, pattern"
             ).fetchall()
         return [
             Grant(
                 id=int(r["id"]), tool_name=r["tool_name"], pattern=r["pattern"],
-                created_by=r["created_by"], created_at=int(r["created_at"]),
-                use_count=int(r["use_count"]),
+                match_type=r["match_type"], created_by=r["created_by"],
+                created_at=int(r["created_at"]), use_count=int(r["use_count"]),
             )
             for r in rows
         ]
 
-    def find_grant(self, tool_name: str, tool_input: object) -> Grant | None:
-        """The grant covering this call, if any, counting the use.
+    def find_grant(self, tool_name: str, tool_input: object) -> list[Grant] | None:
+        """The grants covering this call, if any, counting each use.
 
-        Matching is done in Python rather than SQL because it is not a LIKE: it
-        enforces a word boundary and refuses any command containing shell
-        metacharacters. See grants.matches.
+        Matching happens in Python, not SQL: it is not a LIKE. A compound command
+        needs every segment covered, quote-aware splitting, a word boundary, and a
+        refusal to generalise anything containing substitution or redirection. See
+        grants.covered_by.
         """
-        for grant in self.list_grants():
-            if matches(grant.tool_name, grant.pattern, tool_name, tool_input):
-                with self._lock:
-                    self._db.execute(
-                        "UPDATE grants SET use_count = use_count + 1, "
-                        "last_used_at = ? WHERE id = ?",
-                        (int(time.time()), grant.id),
-                    )
-                    self._db.commit()
-                return grant
-        return None
+        used = covered_by(self.list_grants(), tool_name, tool_input)
+        if not used:
+            return None
+        now = int(time.time())
+        with self._lock:
+            for grant in used:
+                self._db.execute(
+                    "UPDATE grants SET use_count = use_count + 1, "
+                    "last_used_at = ? WHERE id = ?",
+                    (now, grant.id),
+                )
+            self._db.commit()
+        return used
 
     def revoke_grant(self, grant_id: int) -> bool:
         with self._lock:

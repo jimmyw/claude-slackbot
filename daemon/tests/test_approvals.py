@@ -329,7 +329,7 @@ async def scenario_grants(tmp: Path) -> None:
     service = ApprovalService(config, store, slack)
     await service.start()
     try:
-        store.add_grant("Bash", "git status", AUTHORIZED)
+        store.add_grant("Bash", "git status", AUTHORIZED, "prefix")
         service.register_run("tok8", "C1", "888.1", "sess-8")
 
         verdict = await post_approve(
@@ -359,10 +359,14 @@ async def scenario_grants(tmp: Path) -> None:
         blocks = slack.posted[0]["blocks"]
         buttons = [b for b in blocks if b["type"] == "actions"][0]["elements"]
         labels = [b["text"]["text"] for b in buttons]
-        check("and offers NO 'always allow' button for it",
-              not any("Always" in b for b in labels), labels)
+        # It does offer a grant, but only for that exact string: offering a
+        # prefix here would have put "Always allow: git status, rm" in front of
+        # the operator.
+        always = [b for b in labels if "Always" in b]
+        check("a chained rm is offered only as an EXACT grant",
+              always == ["Always allow this exact command"], labels)
 
-        approval_id = buttons[0]["value"].split("|")[0]
+        approval_id = buttons[0]["value"]
         body, action = click(ACTION_DENY, approval_id, AUTHORIZED)
         await service.handle_button(body, action, FakeRespond())
         v = await asyncio.wait_for(pending, timeout=5)
@@ -386,7 +390,8 @@ async def scenario_grants(tmp: Path) -> None:
               [b["text"]["text"] for b in buttons])
         if always:
             check("the offered pattern is the narrow one",
-                  always["text"]["text"].endswith("ls"), always["text"]["text"])
+                  always["text"]["text"] == "Always allow: ls",
+                  always["text"]["text"])
             body, action = click(ACTION_ALWAYS, always["value"], AUTHORIZED)
             action["action_id"] = ACTION_ALWAYS
             await service.handle_button(body, action, FakeRespond())
