@@ -63,12 +63,19 @@ runcmd:
   # copies are root-owned and get installed into place here instead.
   - ["mkdir", "-p", "/home/agent/.claude/hooks", "/home/agent/memory", "/home/agent/work"]
 @@INSTALL_FILES@@
+  # Ownership BEFORE the installer: the mkdir above runs as root and `install`
+  # only sets ownership on the files it writes, not on parent directories it
+  # creates. Leaving this until afterwards makes /home/agent/.claude root-owned
+  # and the installer dies with "cannot create directory .claude/downloads".
+  - ["chown", "-R", "agent:agent", "/home/agent"]
   # Claude Code's native installer ships a standalone binary — no Node toolchain
-  # needed in the guest.
+  # needed in the guest. It lands in ~/.local/bin.
   # -f makes curl fail loudly on an HTTP error, and `set -o pipefail` means a
   # failed download does not silently feed an empty script into bash.
   - ["su", "-l", "agent", "-c", "set -o pipefail; curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh | bash"]
   - ["chown", "-R", "agent:agent", "/home/agent"]
+  # Fail the boot loudly rather than leaving a VM that looks fine but has no CLI.
+  - ["su", "-l", "agent", "-c", "command -v claude && claude --version"]
   - ["rm", "-rf", "/var/lib/agent-provision"]
   - ["systemctl", "restart", "ssh"]
   # Leave a marker the host can check to confirm provisioning finished.
