@@ -63,8 +63,16 @@ class Daemon:
 
         @app.event("message")
         async def on_message(event, say):  # noqa: ANN001
-            # Only threaded replies; a bare channel message that does not mention
-            # the bot and is not in a known thread is none of our business.
+            # A direct message is unambiguously addressed to the bot, so it needs
+            # no mention and starts a session like one. Without this branch DMs are
+            # silently dropped: the only event that arrives is app_home_opened and
+            # the bot appears dead in its own DM.
+            if event.get("channel_type") == "im":
+                await self._on_message(event, is_mention=True)
+                return
+
+            # In a channel, only threaded replies. A bare message that does not
+            # mention the bot and is not in a known thread is none of our business.
             if event.get("thread_ts") is None:
                 return
             # A mention inside a thread fires BOTH app_mention and message.
@@ -75,6 +83,22 @@ class Daemon:
             ):
                 return
             await self._on_message(event, is_mention=False)
+
+        # Surfaces we acknowledge and ignore. Without listeners Bolt logs a 404
+        # and a multi-line suggestion for every one, which buries real entries in
+        # the only log the operator can read. The app has assistant:write, so the
+        # DM pane is an Assistant surface and emits these alongside message.im.
+        @app.event("app_home_opened")
+        async def on_home_opened(event):  # noqa: ANN001
+            return
+
+        @app.event("assistant_thread_started")
+        async def on_assistant_thread_started(event):  # noqa: ANN001
+            return
+
+        @app.event("assistant_thread_context_changed")
+        async def on_assistant_context_changed(event):  # noqa: ANN001
+            return
 
         @app.action(ACTION_APPROVE)
         async def on_approve(ack, body, action, respond):  # noqa: ANN001

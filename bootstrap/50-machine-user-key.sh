@@ -65,8 +65,18 @@ echo "==> Installing the ssh-agent unit"
 install -m 0644 "$REPO_DIR/daemon/systemd/slack-claude-ssh-agent.service" "$UNIT_DIR/"
 install -m 0644 "$REPO_DIR/daemon/systemd/slack-claude-daemon.service" "$UNIT_DIR/"
 systemctl --user daemon-reload
-systemctl --user enable --now slack-claude-ssh-agent.service
+# Report rather than abort: with `set -e` a failure here skipped the daemon
+# restart below, leaving the daemon running an older environment for hours with
+# no sign anything was wrong.
+if ! systemctl --user enable --now slack-claude-ssh-agent.service; then
+    echo "    WARNING: ssh-agent unit failed to start; see" >&2
+    echo "      systemctl --user status slack-claude-ssh-agent" >&2
+    echo "      tail ~/.local/share/slack-claude/ssh-agent.log" >&2
+fi
+# The daemon must be restarted either way: it reads FORWARD_AGENT and
+# SSH_AUTH_SOCK only at startup.
 systemctl --user restart slack-claude-daemon.service
+systemctl --user is-active slack-claude-daemon | sed "s/^/    daemon: /"
 
 echo
 echo "==> Agent state"
