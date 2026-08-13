@@ -41,9 +41,44 @@ SSH=(ssh -i "$ADMIN_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
      -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "admin@$VM_HOST")
 
 echo "==> Cloning $GIT_URL as the agent user"
+set +e
 "${SSH[@]}" "GIT_URL='$GIT_URL' DIR_NAME='$DIR_NAME' WORKDIR='$WORKDIR' \
     WITH_SUBMODULES='$WITH_SUBMODULES' bash -s" <<'REMOTE'
 set -eu
+
+# Identity of a clone is its REMOTE, not its directory name. Without this, giving
+# a repo a short local name once means a later invocation without that third
+# argument clones the same repo a second time under its default name — two working
+# copies of one repo, diverging silently.
+existing=$(
+    for d in "$WORKDIR"/*/; do
+        sudo test -d "$d.git" || continue
+        # As agent, not root: git's safe.directory protection refuses a repo
+        # owned by another user and this returns empty rather than failing, so a
+        # root-run check silently finds no existing clone and happily makes a
+        # second one.
+        url=$(sudo -u agent -H git -C "$d" config --get remote.origin.url 2>/dev/null || true)
+        [ -n "$url" ] || continue
+        # Compare owner/repo only: the same repo may be addressed as
+        # git@github.com:o/r.git, git@github.com-alias:o/r.git or an https URL.
+        # Two expressions, not one: POSIX ERE has no lazy quantifier, so a `+?`
+        # here silently leaves the .git suffix attached and nothing ever matches.
+        norm=$(printf '%s' "$url"     | sed -E 's#\.git/?$##; s#^.*[:/]([^:/]+/[^:/]+)$#\1#')
+        want=$(printf '%s' "$GIT_URL" | sed -E 's#\.git/?$##; s#^.*[:/]([^:/]+/[^:/]+)$#\1#')
+        if [ "$norm" = "$want" ]; then printf '%s' "${d%/}"; break; fi
+    done
+)
+
+if [ -n "$existing" ] && [ "$existing" != "$WORKDIR/$DIR_NAME" ]; then
+    echo "    this repo is ALREADY cloned at $existing"
+    echo "    (matched on remote, not directory name — refusing to make a second copy)"
+    echo "    to move it:  sudo mv '$existing' '$WORKDIR/$DIR_NAME'"
+    echo "    a plain mv is safe: git stores only relative paths internally."
+    # 3 = "already present elsewhere". The local side must stop too: an `exit 0`
+    # here only ends this remote shell, and the caller would then verify a
+    # directory that was never created.
+    exit 3
+fi
 
 # sudo test, not [ -e ]: admin cannot traverse /home/agent, so a bare test
 # reports "does not exist" for a directory that plainly does — and the clone
@@ -68,6 +103,15 @@ if [ "$WITH_SUBMODULES" = true ]; then
       || echo "    SUBMODULES FAILED — each is a separate repo needing its own read access"
 fi
 REMOTE
+clone_status=$?
+set -e
+
+if [[ "$clone_status" -eq 3 ]]; then
+    exit 0        # already cloned elsewhere; the remote side explained where
+elif [[ "$clone_status" -ne 0 ]]; then
+    echo "clone failed (exit $clone_status)" >&2
+    exit "$clone_status"
+fi
 
 echo
 echo "==> Verifying the agent can actually work in it"
@@ -100,7 +144,7 @@ else
 fi
 
 if sudo test -f "$DIR/.gitmodules"; then
-    total=$(sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | wc -l)
+    total=$(sudo -u agent -H git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | wc -l)
     missing=0
     while read -r path; do
         [ -z "$path" ] && continue
@@ -110,7 +154,7 @@ if sudo test -f "$DIR/.gitmodules"; then
         if [ -z "$(sudo ls -A "$DIR/$path" 2>/dev/null)" ]; then
             missing=$((missing + 1))
         fi
-    done <<< "$(sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}')"
+    done <<< "$(sudo -u agent -H git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.path' | awk '{print $2}')"
 
     if [ "$missing" -gt 0 ]; then
         echo "  WARN  $missing of $total submodules are EMPTY directories"
@@ -118,7 +162,7 @@ if sudo test -f "$DIR/.gitmodules"; then
         echo "        wrongly. Each submodule is a separate private repo and needs"
         echo "        its own read access; re-run with --submodules once that is in"
         echo "        place. Repos required:"
-        sudo git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.url' \
+        sudo -u agent -H git -C "$DIR" config -f .gitmodules --get-regexp 'submodule\..*\.url' \
           | awk '{print "          " $2}' | sort -u
     else
         echo "  PASS  all $total submodules populated"

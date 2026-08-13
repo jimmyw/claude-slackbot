@@ -230,6 +230,27 @@ Checked against Claude Code 2.1.231 on terra:
   Slack as a bare "Not logged in" with no clue why. Use
   `install -d -o agent -g agent -m 0700` for each directory level, and verify
   with `sudo -u agent test -r` rather than by reading the file's own mode.
+- **`sudo git` in an agent-owned repo returns EMPTY, not an error.** git's
+  `safe.directory` protection refuses a repo owned by another user, and
+  `git config --get` then yields an empty string rather than failing visibly. A
+  duplicate-clone guard built on `sudo git config --get remote.origin.url`
+  therefore found no existing clone and cheerfully made a second one. Run every
+  git read as the owner: `sudo -u agent -H git ...`. The earlier symptom
+  "fatal: --local can only be used inside a git repository" was this same refusal.
+- **`cmd | head` and `cmd | sed` hide the exit status.** A pipeline's status is the
+  *last* command's, so `grep -q x | head || echo "not found"` never reports, and
+  `git fetch | sed 's/^/ /' && echo OK` prints OK for a failed fetch. This produced
+  three false readings in one session. Capture into a variable and check `$?`, or
+  use `PIPESTATUS`.
+- **My own request rate caused two "failures" today.** Rapid ssh retries exhausted
+  the guest's `MaxStartups` (see above), and a burst of GitHub key auths — verify,
+  three clones, several fetches, two `ssh -T` in about two minutes — produced a
+  transient `Permission denied (publickey)` that cleared on its own with the key
+  unchanged. When something that worked a minute ago stops working, consider the
+  request rate before the configuration.
+- **A remote `exit` only ends the remote shell.** `ssh host bash -s <<EOF ... exit 0`
+  does not stop the local script, which then proceeds to verify work that was never
+  done. Return a distinct code and branch on it locally.
 - **Uninitialised submodules are EMPTY directories, not absent ones.** A clone
   without `--recurse-submodules` leaves real-looking but contentless components,
   so the agent reads the tree as complete and documents it wrongly — silently.
