@@ -17,6 +17,18 @@ set -euo pipefail
 
 log() { printf '%s agent-exec: %s\n' "$(date -Is)" "$*" >&2; }
 
+# The Claude Code native installer puts the binary in ~/.local/bin, which is NOT
+# on PATH for a non-login shell — Debian hands an ssh forced command exactly
+# /usr/local/bin:/usr/bin:/bin:/usr/games. This script *is* a forced command, so
+# without this it fails with "claude: command not found" no matter how healthy
+# the install is.
+export PATH="${HOME:-/home/agent}/.local/bin:$PATH"
+
+if ! command -v claude >/dev/null 2>&1; then
+    log "claude not found on PATH=$PATH"
+    exit 69
+fi
+
 JOB_FILE="$(mktemp)"
 trap 'rm -f "$JOB_FILE"' EXIT
 cat > "$JOB_FILE"

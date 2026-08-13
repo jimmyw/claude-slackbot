@@ -125,6 +125,20 @@ Checked against Claude Code 2.1.231 on terra:
   `owner: agent:agent` on a write_files entry fails on a first boot. Files are
   staged root-owned under `/var/lib/agent-provision` and installed into place by
   a late `runcmd` instead.
+- **An ssh forced command gets a non-login shell**, whose PATH on Debian is
+  exactly `/usr/local/bin:/usr/bin:/bin:/usr/games` — no `~/.local/bin`, which is
+  where the Claude Code native installer puts the binary. `agent-exec` therefore
+  exports it explicitly and exits 69 with a readable log line if `claude` is
+  still missing. Checking `claude --version` over an interactive login proves
+  nothing about this; `verify-guest.sh` checks it in the right environment.
+- **cloud-init runcmd order matters for ownership.** `mkdir -p` in runcmd runs as
+  root, and `install -o agent` sets ownership on the files it writes but not on
+  parent directories it creates. With `chown -R agent:agent /home/agent` placed
+  after the Claude Code install, the installer died on
+  `cannot create directory '/home/agent/.claude/downloads': Permission denied`
+  while cloud-init still reported success. chown now runs *before* the install,
+  and a `claude --version` step at the end makes the boot fail loudly instead of
+  leaving a VM that looks fine but has no CLI.
 - **Docker breaks libvirt NAT on this host.** `dockerd` sets the iptables
   FORWARD policy to DROP, and in netfilter a drop verdict is terminal across
   every base chain at the hook — so libvirt's own accept rules cannot rescue it.

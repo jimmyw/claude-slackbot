@@ -35,6 +35,8 @@ bootstrap/
   10-provision-vm.sh       creates the VM (unprivileged, after 00)
   20-nftables-egress.sh    privileged; LAN-deny egress policy
   30-install-vm-files.sh   pushes vm-files/ UPDATES to a running guest
+  verify-guest.sh          checks a provisioned guest is correct
+  verify-egress.sh         checks public egress works and LAN/host do not
   cloud-init/user-data     guest provisioning template
   render-cloud-init.py     embeds vm-files/ + both pubkeys into the seed
 daemon/
@@ -183,7 +185,11 @@ cd daemon
    ```sh
    ssh -i ~/.ssh/agent_vm_ed25519 agent@<ip>          # expect: exit 64, "empty job"
    ```
-3. **Egress and containment** — one script checks both halves:
+3. **Guest provisioning** — `./bootstrap/verify-guest.sh <vm-ip>` checks
+   cloud-init finished, the tooling and Claude Code are installed and reachable
+   *in a non-login shell*, the embedded files have the right owners and modes,
+   the approval hook fails closed, and the daemon key cannot get a shell.
+4. **Egress and containment** — one script checks both halves:
    ```sh
    ./bootstrap/verify-egress.sh <vm-ip>
    ```
@@ -191,17 +197,17 @@ cd daemon
    the private ranges are all unreachable. It discovers terra's addresses from
    `ip addr`, so a new VLAN or interface is covered automatically. Re-run it after
    any Docker restart or reboot — both rewrite the FORWARD chain.
-4. **Loop** — mention the bot; the reply streams in. Reply in-thread; it shows it
+5. **Loop** — mention the bot; the reply streams in. Reply in-thread; it shows it
    kept context. `sqlite3 ~/.local/share/slack-claude/state.sqlite3 'select * from threads'`
    shows one row with a stable `session_id`.
-5. **Gate** — ask it to write a file. Buttons appear. **Click as a second Slack
+6. **Gate** — ask it to write a file. Buttons appear. **Click as a second Slack
    user → refused, still pending.** Click as yourself → the write goes through.
    Repeat and let it time out → denied, and `select state from approvals` reads
    `timeout`.
-6. **Lifecycle** — `systemctl --user restart slack-claude-daemon`, then a Slack
+7. **Lifecycle** — `systemctl --user restart slack-claude-daemon`, then a Slack
    message still works. Reboot terra: VM autostarts, daemon autostarts, the bot
    answers with no manual step.
-7. **Memory** — ask it to remember something. Start a **new** thread and ask
+8. **Memory** — ask it to remember something. Start a **new** thread and ask
    about it; it should recall from `memory/MEMORY.md`.
 
 ## Hardening (not done yet)
