@@ -23,7 +23,7 @@ if [[ -z "$VM_HOST" ]]; then
 fi
 
 SSH=(ssh -i "$ADMIN_KEY" -o IdentitiesOnly=yes -o BatchMode=yes
-     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "agent@$VM_HOST")
+     -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 "admin@$VM_HOST")
 
 # Every IPv4 address belonging to this host, plus its LAN neighbours and the
 # gateway — discovered rather than hardcoded, so a new interface or VLAN on terra

@@ -88,8 +88,10 @@ export AGENT_RUN_TOKEN="$RUN_TOKEN"
 
 cd "$CWD"
 
-# Overridable so the end-to-end test can run this script outside the VM.
-SETTINGS="${AGENT_SETTINGS:-/home/agent/.claude/settings.json}"
+# Root-owned and outside /home/agent on purpose: the agent must not be able to
+# edit the gate that constrains it. Overridable so the e2e test can run this
+# script outside the VM.
+SETTINGS="${AGENT_SETTINGS:-/etc/claude-agent/settings.json}"
 
 ARGS=(
     --print "$PROMPT"

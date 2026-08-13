@@ -91,9 +91,16 @@ Create an app at <https://api.slack.com/apps>:
 This generates **two** SSH keys and embeds all of `vm-files/` into the cloud-init
 seed, so the guest is fully provisioned on first boot:
 
-- `~/.ssh/agent_vm_ed25519` — the daemon's key, pinned to a forced command. No
-  shell, no rsync.
-- `~/.ssh/agent_vm_admin_ed25519` — a normal shell, for maintenance.
+- `~/.ssh/agent_vm_ed25519` → the **`agent`** account: no sudo, pinned to a
+  forced command. No shell, no rsync. This is all the daemon ever uses.
+- `~/.ssh/agent_vm_admin_ed25519` → the **`admin`** account: shell + sudo, for
+  maintenance and `claude setup-token`. Never used by the daemon.
+
+Two accounts on purpose. With one shared account, the agent inherited `admin`'s
+`NOPASSWD: ALL`, so any single approved `Bash` call was a root shell — and root
+could rewrite the approval gate. The gate's own files
+(`/etc/claude-agent/approve.py`, `settings.json`) are root-owned for the same
+reason: the identity a control constrains must not be able to edit that control.
 
 The files are embedded rather than pushed afterwards because on a fresh VM there
 is nothing to push *with*: the daemon key can't open a shell, and `lock_passwd:
@@ -103,11 +110,26 @@ unreachable and has to be rebuilt.
 Wait for cloud-init (it installs Claude Code), lock down egress, then authenticate:
 
 ```sh
-ssh -i ~/.ssh/agent_vm_admin_ed25519 agent@<vm-ip> 'cloud-init status --wait'
+ssh -i ~/.ssh/agent_vm_admin_ed25519 admin@<vm-ip> 'cloud-init status --wait'
 sudo ./bootstrap/20-nftables-egress.sh
-ssh -i ~/.ssh/agent_vm_admin_ed25519 agent@<vm-ip>
-claude setup-token        # browser flow; installs the long-lived token
+
+# From a real terminal (setup-token needs a TTY):
+ssh -t -i ~/.ssh/agent_vm_admin_ed25519 admin@<vm-ip>
+PATH=/home/agent/.local/bin:$PATH claude setup-token
 ```
+
+`setup-token` prints a token rather than writing a credentials file, and a forced
+command reads neither `~/.bashrc` nor `~/.profile` — so an exported variable never
+reaches `agent-exec`. Install it into the guest with:
+
+```sh
+./bootstrap/install-vm-token.sh <vm-ip>     # prompts with echo off
+```
+
+It goes to `/home/agent/.config/claude-agent/token`, mode 0600, agent-owned, and
+never touches the host disk or your shell history. **Do not paste the token into
+a chat or a terminal that logs** — if you have, revoke it in the Anthropic console
+and issue a new one.
 
 `30-install-vm-files.sh <vm-ip>` pushes later changes to `vm-files/`; it isn't
 needed for a fresh build.
@@ -209,6 +231,15 @@ cd daemon
    answers with no manual step.
 8. **Memory** — ask it to remember something. Start a **new** thread and ask
    about it; it should recall from `memory/MEMORY.md`.
+
+## What the approval gate is, and is not
+
+It is a guardrail against the agent doing something unhelpful, plus an audit
+trail of every decision. It is **not** a sandbox against a determined adversary
+that already has code execution: one approved `Bash` call is arbitrary code as
+`agent`, and its working directory is writable. The VM boundary and the egress
+policy are the real security controls. The gate makes an autonomous agent safe to
+supervise; it does not make a hostile one safe to run.
 
 ## Hardening (not done yet)
 

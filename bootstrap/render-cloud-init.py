@@ -27,21 +27,29 @@ from pathlib import Path
 STAGING = "/var/lib/agent-provision"
 
 # (source under vm-files/, destination in the guest, mode, owner)
+# The gate's script and the settings that register it are root-owned and live
+# outside /home/agent. They used to sit in the agent's own home, agent-writable,
+# which meant a single approved Write could delete the gate for every future
+# session — no sudo required. The identity a control constrains must not be able
+# to edit that control.
+#
+# CLAUDE.md is root-owned for the same reason: it is instruction, not workspace.
+# memory/ is the one thing the agent must be able to write.
 PAYLOAD = [
     ("usr/local/bin/agent-exec", "/usr/local/bin/agent-exec", "0755", "root:root"),
     (
-        "home/agent/.claude/hooks/approve.py",
-        "/home/agent/.claude/hooks/approve.py",
+        "etc/claude-agent/approve.py",
+        "/etc/claude-agent/approve.py",
         "0755",
-        "agent:agent",
+        "root:root",
     ),
     (
-        "home/agent/.claude/settings.json",
-        "/home/agent/.claude/settings.json",
+        "etc/claude-agent/settings.json",
+        "/etc/claude-agent/settings.json",
         "0644",
-        "agent:agent",
+        "root:root",
     ),
-    ("home/agent/CLAUDE.md", "/home/agent/CLAUDE.md", "0644", "agent:agent"),
+    ("home/agent/CLAUDE.md", "/home/agent/CLAUDE.md", "0644", "root:root"),
     (
         "home/agent/memory/MEMORY.md",
         "/home/agent/memory/MEMORY.md",

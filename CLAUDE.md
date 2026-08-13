@@ -120,6 +120,23 @@ Checked against Claude Code 2.1.231 on terra:
   virsh call in this repo pins the URI explicitly; `tests/test_vmctl.py` guards
   it. Symptom if it regresses: the daemon reports "the VM is not running" on
   every turn regardless of the VM's actual state.
+- **The agent must not be able to edit its own gate.** The first build put the
+  hook script and the settings registering it in `/home/agent/.claude/`,
+  agent-owned and agent-writable, and gave `agent` `NOPASSWD: ALL`. So a single
+  approved `Write` deleted the gate for every future session — no sudo even
+  needed — and sudo made root trivial on top. Now: the hook and its settings live
+  in `/etc/claude-agent/` root-owned, `CLAUDE.md` is root-owned too (it is
+  instruction, not workspace), and only `memory/` is agent-writable. There are
+  two guest accounts — `agent` (no sudo, forced command only) and `admin` (sudo +
+  shell, maintenance only, never used by the daemon). `verify-guest.sh` asserts
+  the agent cannot write any gate file and has no sudo.
+- **What the gate is and is not.** It is a guardrail against an agent doing
+  something unhelpful, and an audit trail. It is not a sandbox against a
+  determined adversary who already has code execution: the agent's cwd
+  (`/home/agent/work`) is writable, so project-level Claude settings there are in
+  reach, and one approved `Bash` call is arbitrary code as `agent`. The VM plus
+  the egress policy are the real security boundary; the gate is the usability
+  layer on top. Do not reason as though the gate alone contains a hostile agent.
 - **The guest needs TWO keys.** The daemon key is pinned to a forced command,
   so it cannot open a shell or run rsync. With only that key and
   `lock_passwd: true`, a freshly provisioned VM is completely unreachable —
