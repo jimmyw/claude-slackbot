@@ -162,6 +162,18 @@ Checked against Claude Code 2.1.231 on terra:
   otherwise needs), so `30-install-vm-files.sh` ships files with `tar` over ssh.
   Its chown needs `sudo`, because cloud-init leaves root-owned markers such as
   `.provisioned` in /home/agent.
+- **Never let a heredoc and a pipe both feed one ssh stdin.** In
+  `printf token | ssh host 'bash -s' <<'EOF' ... EOF` the heredoc wins and the
+  piped token is silently discarded — the remote `cat` reads an empty stream and
+  installs a plausible-looking empty file. Put the remote commands in argv (they
+  hold no secret; only the path) and reserve stdin for the payload. Then assert
+  the result is non-empty, because the failure is otherwise invisible.
+- **`mkdir -p` as root under `umask 077` creates `drwx------ root:root`.** The
+  token file can be perfectly `-rw------- agent:agent` and still be unreachable,
+  because the agent cannot traverse the parent directories — which surfaces in
+  Slack as a bare "Not logged in" with no clue why. Use
+  `install -d -o agent -g agent -m 0700` for each directory level, and verify
+  with `sudo -u agent test -r` rather than by reading the file's own mode.
 - **`/home/agent` is `drwx------ agent:agent`**, so the `admin` account cannot
   read or traverse it without sudo. Two consequences that both bit: anything
   admin runs against Claude Code needs `sudo -u agent -H`, and an unprivileged
