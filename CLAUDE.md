@@ -235,6 +235,21 @@ Checked against Claude Code 2.1.231 on terra:
   failure — the command reports success and deletes nothing. Use
   `sudo sh -c "rm -f /dir/*"` so root does the expansion. Same trap as every other
   identity bug here, wearing a different hat.
+- **ssh-agent destination constraints DO NOT work for git in the guest.** The
+  intended design was `ssh-add -h "<vm>>git@github.com"` so a compromised guest
+  could only aim the key at GitHub. It adds cleanly and then the agent hides the
+  key. `ssh-agent -d` shows why: "1 socket bindings, 1 constraints", the single
+  binding being the VM's hostkey. The inner ssh that git spawns is a separate
+  client whose session-bind never joins the outer chain, so the agent sees `[vm]`
+  while the constraint demands `[vm, github]`. Constraints are designed for one
+  client traversing hops (ProxyJump); a nested ssh relayed through sshd does not
+  accumulate. Two wrong theories were discarded first — GitHub *does* support
+  `publickey-hostbound` (the `=<0>` is the version, and 0 is current), and the
+  hostkeys did match.
+  Consequence: forwarding is unconstrained, so **it is only safe with a read-only
+  machine user.** With a personal account's key it forwards write access to every
+  repo that account can write. `verify-agent-forwarding.sh` therefore parses the
+  "Hi <user>!" banner and asserts the account name.
 - **`ssh-add -h` rejects a user on the "from" hop.** The constraint is
   `<vm-host>>git@github.com`, not `agent@<vm-host>>git@github.com`; the latter
   fails with "cannot specify user on 'from' host" because the agent cannot verify

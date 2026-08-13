@@ -4,11 +4,25 @@
 #
 # Run by slack-claude-ssh-agent.service as ExecStartPost. Safe to run by hand.
 #
-# The destination constraint is the reason this design is acceptable at all.
-# Plain agent forwarding lets whoever controls the remote end use the key for
-# anything they like; `ssh-add -h agent@vm>git@github.com` pins it to that single
-# hop, so a compromised guest cannot authenticate to terra or anywhere else with
-# it. Constraints need the hostkeys of every hop, hence -H.
+# The key is added WITHOUT a destination constraint, which was not the original
+# intent. Constraints do not work for this use case, and here is the evidence:
+#
+#   ssh-add -h "<vm>>git@github.com" adds cleanly, but the agent then hides the
+#   key from the guest. Its debug output shows why — "1 socket bindings, 1
+#   constraints", the single binding being the VM's hostkey. The inner ssh that
+#   git spawns in the guest is a separate client whose session-bind never joins
+#   the outer chain, so the agent only ever sees [vm] and the constraint requires
+#   [vm, github]. Constraints are built for one client traversing multiple hops
+#   (ProxyJump), not for a nested ssh relayed through sshd, which is what git does.
+#
+# What this costs: during a run the guest can use the key against any host that
+# trusts it. For a GitHub-only machine user that is GitHub and nowhere else, so
+# the practical exposure equals the access being granted on purpose. The key
+# itself still cannot be extracted — agents never hand out private key material —
+# and it is unreachable between runs.
+#
+# What it therefore REQUIRES: a read-only machine user. With a personal account's
+# key this forwards write access to every repo that account can write.
 set -euo pipefail
 
 STATE_DIR="${STATE_DIR:-$HOME/.local/share/slack-claude}"
@@ -49,8 +63,8 @@ fi
 
 mkdir -p "$STATE_DIR"
 
-# Hostkeys for both hops. Without these ssh-add refuses the constraint, and
-# without the *right* ones a MITM on either hop could harvest signatures.
+# Kept for the VM hostkey record even though no constraint is applied, so
+# verify-agent-forwarding.sh can compare against what the daemon connects to.
 : > "$KNOWN_HOSTS.new"
 if ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null >> "$KNOWN_HOSTS.new"; then
     log "scanned github.com hostkeys"
@@ -77,11 +91,10 @@ ssh-add -D >/dev/null 2>&1 || true
 # No user on the "from" hop: ssh-add rejects it with "cannot specify user on
 # 'from' host", because at that point in the chain the user is not something the
 # agent can verify. The destination hop may and should name one.
-CONSTRAINT="$VM_HOST>git@github.com"
-if ssh-add -H "$KNOWN_HOSTS" -h "$CONSTRAINT" "$KEY" 2>&1 | sed 's/^/  /'; then
-    log "added $(basename "$KEY") constrained to $CONSTRAINT"
+if ssh-add "$KEY" 2>&1 | sed 's/^/  /'; then
+    log "added $(basename "$KEY") (UNCONSTRAINED — see the comment above)"
 else
-    log "ssh-add FAILED for constraint $CONSTRAINT"
+    log "ssh-add FAILED"
     exit 1
 fi
 
