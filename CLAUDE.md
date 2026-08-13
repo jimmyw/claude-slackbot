@@ -162,6 +162,19 @@ Checked against Claude Code 2.1.231 on terra:
   otherwise needs), so `30-install-vm-files.sh` ships files with `tar` over ssh.
   Its chown needs `sudo`, because cloud-init leaves root-owned markers such as
   `.provisioned` in /home/agent.
+- **A `systemctl --user` unit with mount-namespace sandboxing sees root-owned
+  files as `nobody:nobody`.** `ProtectSystem`, `ProtectHome` and `PrivateTmp` each
+  put the service in a user namespace where only the invoking uid maps; root maps
+  to nobody. ssh validates the ownership of its config files, so it aborts with
+  `Bad owner or permissions on /etc/ssh/ssh_config.d/20-systemd-ssh-proxy.conf`
+  and exit 255 before opening any connection. `NoNewPrivileges` is fine — it
+  creates no namespace. Fix: `ssh -F /dev/null`, which skips the user *and* the
+  system-wide config (passing -F suppresses both). That is also the right default
+  for a daemon, which should not inherit ambient host ssh config.
+  **This class of bug is invisible outside the service** — every bridge test ran
+  ssh from a normal shell and passed. `test_bridge_args.py` asserts the flag, and
+  `systemd-run --user -p ProtectSystem=strict ...` reproduces the namespace
+  cheaply when something looks fine by hand but fails as a unit.
 - **`StartLimitIntervalSec` belongs in `[Unit]`, not `[Service]`.** systemd
   silently ignores it under `[Service]` (`Unknown key ... ignoring`), so the
   crash-loop protection it is meant to provide was never in effect. Check unit
