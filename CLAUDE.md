@@ -84,9 +84,10 @@ sessions.
   with tailnet ACLs or to accept the tailnet as the boundary.
 - Whether to tighten egress from the current LAN-deny baseline to a
   CONNECT-proxy hostname allowlist (see README, "Hardening").
-- Scoped session-level approval grants ("approve Edit in this thread for
-  10 minutes") to cut button fatigue. The `approvals` schema already
-  accommodates it; deliberately not built for v1.
+- Whether to add thread-scoped, time-boxed grants alongside the persistent
+  prefix ones. Prefix grants are built (see below); a whole-tool grant for Bash
+  was deliberately not, because for arbitrary code it amounts to suspending the
+  gate for the duration.
 
 ## Operational gaps found the hard way
 
@@ -106,6 +107,21 @@ sessions.
   2.3s, and the guest was at 0% CPU with 3.7GB free during the hang. The failure
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
+
+## Standing grants
+
+- Grants are `(tool_name, prefix)` in the daemon's sqlite **on the host**, so the
+  guest can only ask; it cannot grant itself anything. The check happens in
+  `ApprovalService._handle_approve` before any Slack message is posted.
+- A prefix grant is only meaningful because `grants.is_grantable` refuses any Bash
+  command containing `;  &  |  ` + "`" + `  $(  >  <  newline  \\`. Without that,
+  granting `git status` authorises `git status; rm -rf ~`. `matches` re-checks it,
+  so a grant made for a simple command can never cover a compound one.
+- The word boundary is the second half: `git status` must not match
+  `git statusfoo`. Match is exact-equal or prefix followed by a space.
+- Note an earlier claim in this file was wrong: the `approvals` table does NOT
+  accommodate grants — it has no expiry, scope or pattern columns. `grants` is a
+  separate table.
 
 ## Verified behaviour (don't re-derive these)
 

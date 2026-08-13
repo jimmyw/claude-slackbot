@@ -18,7 +18,7 @@ from collections import defaultdict
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.app.async_app import AsyncApp
 
-from .approvals import ACTION_APPROVE, ACTION_DENY, ApprovalService
+from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalService
 from .bridge import Bridge
 from .config import Config, ConfigError
 from .render import SlackRenderer
@@ -121,6 +121,11 @@ class Daemon:
             await ack()
             await self._approvals.handle_button(body, action, respond)
 
+        @app.action(ACTION_ALWAYS)
+        async def on_always(ack, body, action, respond):  # noqa: ANN001
+            await ack()
+            await self._approvals.handle_button(body, action, respond)
+
     async def _on_message(self, event: dict, *, is_mention: bool) -> None:
         if event.get("bot_id") or event.get("subtype"):
             return
@@ -159,8 +164,15 @@ class Daemon:
             log.warning("ignored message from unauthorized user %s", user)
             return
 
-        if text.lower() in {"status", "!status"}:
+        command = text.lower().lstrip("!").strip()
+        if command in {"status"}:
             await self._post_status(channel, thread_ts)
+            return
+        if command in {"grants", "grant", "allowed"}:
+            await self._post_grants(channel, thread_ts)
+            return
+        if command.startswith("revoke"):
+            await self._revoke(channel, thread_ts, command, user or "")
             return
 
         lock = self._thread_locks[(channel, thread_ts)]
@@ -226,6 +238,47 @@ class Daemon:
             self._approvals.unregister_run(run_token)
             await renderer.flush(force=True)
 
+    async def _post_grants(self, channel: str, thread_ts: str) -> None:
+        grants = await asyncio.to_thread(self._store.list_grants)
+        if not grants:
+            await self._app.client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=("No standing grants. Every gated tool call asks.\n"
+                      "Press *Always allow* on an approval to add one."),
+            )
+            return
+        lines = [
+            f"*{len(grants)} standing grant(s)* — these skip the button entirely:"
+        ]
+        for g in grants:
+            used = f"{g.use_count} use{'s' if g.use_count != 1 else ''}"
+            lines.append(f"  `{g.id}`  {g.tool_name}: `{g.pattern}`  ({used})")
+        lines.append("`revoke <id>` to remove one, `revoke all` to clear them.")
+        await self._app.client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts, text="\n".join(lines)
+        )
+
+    async def _revoke(
+        self, channel: str, thread_ts: str, command: str, user: str
+    ) -> None:
+        arg = command[len("revoke"):].strip()
+        if arg in {"all", "*"}:
+            n = await asyncio.to_thread(self._store.revoke_all)
+            log.info("%s revoked all %s grants", user, n)
+            text = f"Revoked {n} grant(s). Everything asks again."
+        elif arg.isdigit():
+            ok = await asyncio.to_thread(self._store.revoke_grant, int(arg))
+            log.info("%s revoked grant %s: %s", user, arg, ok)
+            text = (
+                f"Revoked grant `{arg}`." if ok
+                else f"No grant `{arg}`. Use `grants` to list them."
+            )
+        else:
+            text = "Usage: `revoke <id>` or `revoke all`. `grants` lists them."
+        await self._app.client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts, text=text
+        )
+
     async def _post_status(self, channel: str, thread_ts: str) -> None:
         state = await self._vm.state()
         ip = await self._vm.ip_address()
@@ -240,6 +293,8 @@ class Daemon:
             text=(
                 f"VM `{self._config.vm_domain}`: {state}"
                 f"{f' at {ip}' if ip else ''}\nSSH bridge: {ssh_ok}"
+                f"\nStanding grants: {len(await asyncio.to_thread(self._store.list_grants))}"
+                f" (`grants` to list)"
             ),
         )
 

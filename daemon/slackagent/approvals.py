@@ -25,12 +25,14 @@ from typing import Any
 from aiohttp import web
 
 from .config import Config
+from .grants import suggest_pattern
 from .store import Store
 
 log = logging.getLogger(__name__)
 
 ACTION_APPROVE = "agent_approve"
 ACTION_DENY = "agent_deny"
+ACTION_ALWAYS = "agent_always"
 
 
 @dataclass
@@ -119,6 +121,20 @@ class ApprovalService:
 
         tool_name = body.get("tool_name") or "<unknown>"
         tool_input = body.get("tool_input")
+
+        # An existing grant answers without a button. Checked here, on the host:
+        # the guest only ever asks, so it cannot grant itself anything.
+        granted = await asyncio.to_thread(self._store.find_grant, tool_name, tool_input)
+        if granted is not None:
+            log.info(
+                "auto-approved %s by grant #%s (%r)",
+                tool_name, granted.id, granted.pattern,
+            )
+            return web.json_response({
+                "approved": True,
+                "reason": f"covered by grant #{granted.id}: {granted.pattern}",
+            })
+
         approval_id = uuid.uuid4().hex
 
         await asyncio.to_thread(
@@ -137,11 +153,12 @@ class ApprovalService:
         run.approval_ids.add(approval_id)
 
         try:
+            pattern = suggest_pattern(tool_name, tool_input)
             posted = await self._slack.chat_postMessage(
                 channel=run.channel_id,
                 thread_ts=run.thread_ts,
                 text=f"Approval needed: {tool_name}",
-                blocks=_approval_blocks(approval_id, tool_name, tool_input),
+                blocks=_approval_blocks(approval_id, tool_name, tool_input, pattern),
             )
             message_ts = posted["ts"]
             await asyncio.to_thread(
@@ -190,8 +207,12 @@ class ApprovalService:
         visible only to the clicker.
         """
         clicker = (body.get("user") or {}).get("id")
-        approval_id = action.get("value") or ""
-        approve = action.get("action_id") == ACTION_APPROVE
+        raw = action.get("value") or ""
+        action_id = action.get("action_id")
+        # The "always" button carries the pattern after the approval id, since a
+        # Slack button value is the only state it can hand back.
+        approval_id, _, pattern = raw.partition("|")
+        approve = action_id in (ACTION_APPROVE, ACTION_ALWAYS)
 
         # THE access control. Everything else in this file is bookkeeping.
         if clicker != self._config.authorized_user:
@@ -230,6 +251,15 @@ class ApprovalService:
                 }
             )
             return
+
+        if action_id == ACTION_ALWAYS and pattern:
+            grant_id = await asyncio.to_thread(
+                self._store.add_grant, row["tool_name"], pattern, clicker
+            )
+            log.info(
+                "grant #%s created by %s: %s %r",
+                grant_id, clicker, row["tool_name"], pattern,
+            )
 
         future = self._waiters.get(approval_id)
         if future is not None and not future.done():
@@ -273,7 +303,7 @@ class ApprovalService:
 
 
 def _approval_blocks(
-    approval_id: str, tool_name: str, tool_input: Any
+    approval_id: str, tool_name: str, tool_input: Any, pattern: str | None = None
 ) -> list[dict]:
     return [
         {
@@ -297,6 +327,22 @@ def _approval_blocks(
                     "action_id": ACTION_APPROVE,
                     "value": approval_id,
                 },
+                *(
+                    [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                # Truncated: Slack rejects button text over 75 chars.
+                                "text": f"Always allow: {pattern}"[:75],
+                            },
+                            "action_id": ACTION_ALWAYS,
+                            "value": f"{approval_id}|{pattern}",
+                        }
+                    ]
+                    if pattern
+                    else []
+                ),
                 {
                     "type": "button",
                     "style": "danger",
