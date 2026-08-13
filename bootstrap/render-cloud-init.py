@@ -68,6 +68,16 @@ def main() -> int:
     daemon_key = Path(sys.argv[2]).read_text().strip()
     admin_key = Path(sys.argv[3]).read_text().strip()
 
+    # Operator keys are optional: a guest with none is still usable via the
+    # admin key that 10-provision-vm.sh generates.
+    operator_path = repo / "bootstrap/operator-keys.pub"
+    operator_keys = []
+    if operator_path.is_file():
+        for line in operator_path.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                operator_keys.append(line)
+
     template_path = repo / "bootstrap/cloud-init/user-data"
     if not template_path.is_file():
         print(f"missing cloud-init template: {template_path}", file=sys.stderr)
@@ -103,12 +113,19 @@ def main() -> int:
     rendered = (
         template.replace("@@AGENT_PUBKEY@@", daemon_key)
         .replace("@@ADMIN_PUBKEY@@", admin_key)
+        .replace(
+            "@@OPERATOR_KEYS@@",
+            "\n".join(f"      - '{k}'" for k in operator_keys)
+            # An empty list item would be invalid YAML, so emit a comment when
+            # there are no operator keys rather than nothing at all.
+            or "      # (no operator keys configured)",
+        )
         .replace("@@WRITE_FILES@@", "\n".join(write_files))
         .replace("@@INSTALL_FILES@@", "\n".join(install_cmds))
     )
 
     for placeholder in ("@@AGENT_PUBKEY@@", "@@ADMIN_PUBKEY@@", "@@WRITE_FILES@@",
-                        "@@INSTALL_FILES@@"):
+                        "@@INSTALL_FILES@@", "@@OPERATOR_KEYS@@"):
         if placeholder in rendered:
             print(f"placeholder left unsubstituted: {placeholder}", file=sys.stderr)
             return 1

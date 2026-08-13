@@ -8,6 +8,8 @@ dependencies = [
     # is why aiohttp is declared explicitly rather than via an extra.
     "slack-bolt>=1.21",
     "aiohttp>=3.9",
+    # tests/test_cloud_init.py parses the rendered seed.
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
