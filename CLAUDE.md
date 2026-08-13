@@ -68,8 +68,11 @@ sessions.
 
 ## Still open
 
-- Whether the agent should ever push. Currently no: deploy keys are read-only and
-  the guest CLAUDE.md tells it not to try. Its git identity is set
+- **Replace `jimmyw`'s key with a read-only machine user.** Forwarding is
+  unconstrained, so the account is the entire security model; right now the guest
+  can push to anything Jimmy can write during a run.
+- Whether the agent should ever push. The guest CLAUDE.md tells it not to try,
+  but with a personal key forwarded it currently could. Its git identity is set
   (`agent-vm (Claude Code) <jimmy@tibber.com>`) so local commits are clean.
 - **Tailscale in the guest voids the egress guarantee.** As of 2026-08-13 the VM
   is on the tailnet as `agent-vm` (100.76.114.102) and can reach `bigjimmy` via
@@ -235,6 +238,16 @@ Checked against Claude Code 2.1.231 on terra:
   failure — the command reports success and deletes nothing. Use
   `sudo sh -c "rm -f /dir/*"` so root does the expansion. Same trap as every other
   identity bug here, wearing a different hat.
+- **Claude Code's Bash tool strips the environment.** A command run through it
+  reports `SSH_AUTH_SOCK` as UNSET even when the process that launched `claude`
+  had it set — proven by asking the agent to echo it. So a forwarded ssh-agent is
+  invisible to git by default. The fix is to not rely on the environment at all:
+  agent-exec re-points `~/.ssh/agent.sock` at the forwarded socket on every run,
+  and the agent's `~/.gitconfig` carries
+  `core.sshCommand = SSH_AUTH_SOCK=/home/agent/.ssh/agent.sock ssh`.
+  This bites tests too: anything run from a Claude Code Bash tool has no agent, so
+  `ssh -A` from there forwards nothing. Export SSH_AUTH_SOCK explicitly when
+  testing the forwarding path, or you will diagnose a working setup as broken.
 - **ssh-agent destination constraints DO NOT work for git in the guest.** The
   intended design was `ssh-add -h "<vm>>git@github.com"` so a compromised guest
   could only aim the key at GitHub. It adds cleanly and then the agent hides the
