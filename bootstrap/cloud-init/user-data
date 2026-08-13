@@ -1,0 +1,77 @@
+#cloud-config
+# Template for the agent VM's cloud-init. render-cloud-init.py substitutes the
+# @@…@@ placeholders and embeds vm-files/ before the seed ISO is built.
+#
+# Nothing secret belongs in here — the Claude Code credential is installed
+# afterwards, interactively, via `claude setup-token`.
+
+hostname: agent-vm
+fqdn: agent-vm.local
+preserve_hostname: false
+
+users:
+  - name: agent
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
+    ssh_authorized_keys:
+      # The daemon key is pinned to a forced command: it can feed a JSON job to
+      # the CLI runner and nothing else. No shell, no agent/X11 forwarding. The
+      # -R the daemon needs for the approval tunnel still works.
+      - 'command="/usr/local/bin/agent-exec",no-agent-forwarding,no-X11-forwarding,no-pty @@AGENT_PUBKEY@@'
+      # The admin key gets a normal shell. Required for `claude setup-token` and
+      # for pushing updated vm-files later — without it a fresh VM is
+      # unreachable, since the key above cannot run rsync or open a shell.
+      - '@@ADMIN_PUBKEY@@'
+
+package_update: true
+packages:
+  - git
+  - jq
+  - ripgrep
+  - curl
+  - ca-certificates
+  - python3
+
+write_files:
+@@WRITE_FILES@@
+  # The libvirt NAT network is IPv4-only and the egress policy drops IPv6
+  # outright, but Debian's resolver still hands back AAAA records first. Without
+  # these two, every apt fetch and curl burns its connect timeout on an
+  # unreachable IPv6 address before falling back — which is what made the first
+  # build's package install fail outright.
+  - path: /etc/apt/apt.conf.d/99-force-ipv4
+    permissions: "0644"
+    content: |
+      Acquire::ForceIPv4 "true";
+  - path: /etc/gai.conf
+    permissions: "0644"
+    content: |
+      # Prefer IPv4: this guest has no IPv6 route.
+      precedence ::ffff:0:0/96  100
+  - path: /etc/ssh/sshd_config.d/90-agent.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+      # The daemon needs -R for the approval tunnel back to the host.
+      AllowTcpForwarding remote
+      X11Forwarding no
+
+runcmd:
+  # Ownership first: write_files runs before users-groups exists, so the staged
+  # copies are root-owned and get installed into place here instead.
+  - ["mkdir", "-p", "/home/agent/.claude/hooks", "/home/agent/memory", "/home/agent/work"]
+@@INSTALL_FILES@@
+  # Claude Code's native installer ships a standalone binary — no Node toolchain
+  # needed in the guest.
+  # -f makes curl fail loudly on an HTTP error, and `set -o pipefail` means a
+  # failed download does not silently feed an empty script into bash.
+  - ["su", "-l", "agent", "-c", "set -o pipefail; curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh | bash"]
+  - ["chown", "-R", "agent:agent", "/home/agent"]
+  - ["rm", "-rf", "/var/lib/agent-provision"]
+  - ["systemctl", "restart", "ssh"]
+  # Leave a marker the host can check to confirm provisioning finished.
+  - ["touch", "/home/agent/.provisioned"]
+
+final_message: "agent-vm ready after $UPTIME seconds"

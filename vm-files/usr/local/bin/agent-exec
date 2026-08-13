@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Forced command for the daemon's SSH key. The key cannot get a shell — it can
+# only feed one JSON job to the Claude Code CLI and read the stream back.
+#
+# Job on stdin:
+#   {
+#     "prompt":        "<user text from Slack>",
+#     "session_id":    "<uuid>",
+#     "resume":        true|false,
+#     "run_token":     "<opaque per-run token>",
+#     "approval_port": 9101,
+#     "cwd":           "/home/agent/work"     (optional)
+#   }
+#
+# stdout is the raw stream-json event stream; the daemon parses it line by line.
+set -euo pipefail
+
+log() { printf '%s agent-exec: %s\n' "$(date -Is)" "$*" >&2; }
+
+JOB_FILE="$(mktemp)"
+trap 'rm -f "$JOB_FILE"' EXIT
+cat > "$JOB_FILE"
+[[ -s "$JOB_FILE" ]] || { log "empty job"; exit 64; }
+
+# python3 rather than jq: it is already a hard requirement for the approval hook,
+# so this keeps the guest's dependency list one shorter.
+get() {
+    python3 - "$JOB_FILE" "$1" <<'PY'
+import json, sys
+with open(sys.argv[1]) as handle:
+    job = json.load(handle)
+value = job.get(sys.argv[2])
+if value is None:
+    sys.stdout.write("")
+elif isinstance(value, str):
+    sys.stdout.write(value)
+else:
+    sys.stdout.write(json.dumps(value))
+PY
+}
+
+PROMPT="$(get prompt)"
+SESSION_ID="$(get session_id)"
+RESUME="$(get resume)"
+RUN_TOKEN="$(get run_token)"
+APPROVAL_PORT="$(get approval_port)"
+CWD="$(get cwd)"
+[[ -n "$CWD" ]] || CWD=/home/agent/work
+
+for required in PROMPT SESSION_ID RUN_TOKEN APPROVAL_PORT; do
+    [[ -n "${!required}" ]] || { log "missing field: $required"; exit 64; }
+done
+
+# The approval hook reads these. They are the only channel by which the hook
+# learns where to ask for permission — it never holds a Slack token.
+export AGENT_APPROVAL_URL="http://127.0.0.1:${APPROVAL_PORT}/approve"
+export AGENT_RUN_TOKEN="$RUN_TOKEN"
+
+cd "$CWD"
+
+# Overridable so the end-to-end test can run this script outside the VM.
+SETTINGS="${AGENT_SETTINGS:-/home/agent/.claude/settings.json}"
+
+ARGS=(
+    --print "$PROMPT"
+    --output-format stream-json
+    --verbose
+    --settings "$SETTINGS"
+)
+
+if [[ "$RESUME" == "true" ]]; then
+    ARGS+=(--resume "$SESSION_ID")
+else
+    ARGS+=(--session-id "$SESSION_ID")
+fi
+
+log "starting session=$SESSION_ID resume=$RESUME cwd=$CWD"
+
+# stdin is already consumed by the job read; give the CLI /dev/null so it does
+# not sit waiting for piped input.
+exec claude "${ARGS[@]}" < /dev/null

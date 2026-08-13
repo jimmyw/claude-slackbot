@@ -1,0 +1,35 @@
+[Unit]
+Description=Slack-controlled Claude Code daemon
+Documentation=file:///home/tibber/slackbot/README.md
+After=network-online.target libvirtd.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/tibber/slackbot/daemon
+# Secrets live here, mode 0600, never in the repo.
+EnvironmentFile=/home/tibber/slackbot/daemon/.env
+# Belt and braces: vmctl passes --connect explicitly, but a bare virsh run
+# from this unit would otherwise hit the empty qemu:///session instance.
+Environment=LIBVIRT_DEFAULT_URI=qemu:///system
+ExecStart=/home/tibber/slackbot/daemon/.venv/bin/python -m slackagent.app
+Restart=always
+RestartSec=5
+# Socket Mode reconnects on its own; don't let a flapping network trip the
+# start-limit and leave the daemon stopped.
+StartLimitIntervalSec=0
+
+# The daemon holds the Slack token and the VM key. It has no reason to write
+# anywhere but its own state directory.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/tibber/.local/share/slack-claude
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=slack-claude
+
+[Install]
+WantedBy=default.target
