@@ -3,21 +3,26 @@ Description=Slack-controlled Claude Code daemon
 Documentation=file:///home/tibber/slackbot/README.md
 After=network-online.target libvirtd.service
 Wants=network-online.target
+# StartLimit* belong in [Unit], not [Service] — systemd silently ignores them
+# under [Service] ("Unknown key ... ignoring"), so the crash-loop protection this
+# is meant to provide was not actually in effect.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 WorkingDirectory=/home/tibber/slackbot/daemon
-# Secrets live here, mode 0600, never in the repo.
-EnvironmentFile=/home/tibber/slackbot/daemon/.env
+# The leading '-' makes a missing file non-fatal on purpose. Without it, no .env
+# means systemd fails the unit with "unavailable resources or another system
+# error", which says nothing useful. With it, the daemon starts and its own
+# Config.validate() reports exactly which variable is missing — visible in
+# `systemctl --user status` and in the log below.
+EnvironmentFile=-/home/tibber/slackbot/daemon/.env
 # Belt and braces: vmctl passes --connect explicitly, but a bare virsh run
 # from this unit would otherwise hit the empty qemu:///session instance.
 Environment=LIBVIRT_DEFAULT_URI=qemu:///system
 ExecStart=/home/tibber/slackbot/daemon/.venv/bin/python -m slackagent.app
 Restart=always
 RestartSec=5
-# Socket Mode reconnects on its own; don't let a flapping network trip the
-# start-limit and leave the daemon stopped.
-StartLimitIntervalSec=0
 
 # The daemon holds the Slack token and the VM key. It has no reason to write
 # anywhere but its own state directory.
@@ -27,8 +32,11 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/tibber/.local/share/slack-claude
 
-StandardOutput=journal
-StandardError=journal
+# /var/log/journal is root:systemd-journal and tibber is not in that group, so
+# `journalctl --user` cannot read anything on this host. Log to a file the owner
+# can actually tail. Journal output is kept as well, for whoever does have access.
+StandardOutput=append:/home/tibber/.local/share/slack-claude/daemon.log
+StandardError=append:/home/tibber/.local/share/slack-claude/daemon.log
 SyslogIdentifier=slack-claude
 
 [Install]

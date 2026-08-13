@@ -150,8 +150,15 @@ mkdir -p ~/.config/systemd/user
 cp systemd/slack-claude-daemon.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now slack-claude-daemon
-journalctl --user -u slack-claude-daemon -f
+
+# journalctl --user does not work for tibber on terra (/var/log/journal is
+# root:systemd-journal), so the unit also appends to a file:
+tail -f ~/.local/share/slack-claude/daemon.log
 ```
+
+If the unit fails with "unavailable resources or another system error", that is
+almost always a path in the unit that does not exist. `systemd-analyze --user
+verify ~/.config/systemd/user/slack-claude-daemon.service` names the problem.
 
 Invite the bot to a channel and mention it. Replies in the thread continue the
 same Claude session.

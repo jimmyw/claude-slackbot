@@ -162,6 +162,20 @@ Checked against Claude Code 2.1.231 on terra:
   otherwise needs), so `30-install-vm-files.sh` ships files with `tar` over ssh.
   Its chown needs `sudo`, because cloud-init leaves root-owned markers such as
   `.provisioned` in /home/agent.
+- **`StartLimitIntervalSec` belongs in `[Unit]`, not `[Service]`.** systemd
+  silently ignores it under `[Service]` (`Unknown key ... ignoring`), so the
+  crash-loop protection it is meant to provide was never in effect. Check unit
+  files with `systemd-analyze --user verify <path>` — it reports exactly this.
+- **A missing `EnvironmentFile` fails the unit with "unavailable resources or
+  another system error"**, which names nothing. Prefix it with `-` so the daemon
+  starts and its own `Config.validate()` reports which variable is missing.
+  Validate also rejects the unedited `.env.example` placeholders, because they are
+  non-empty and correctly shaped, so the first symptom otherwise is an
+  `invalid_auth` traceback from Slack.
+- **`journalctl --user` does not work for tibber on terra**: `/var/log/journal` is
+  `root:systemd-journal` and tibber is not in that group. The unit therefore also
+  appends to `~/.local/share/slack-claude/daemon.log`, which is inside the one
+  directory `ReadWritePaths` grants.
 - **Never let a heredoc and a pipe both feed one ssh stdin.** In
   `printf token | ssh host 'bash -s' <<'EOF' ... EOF` the heredoc wins and the
   piped token is silently discarded — the remote `cat` reads an empty stream and

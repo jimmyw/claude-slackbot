@@ -102,6 +102,26 @@ class Config:
         return self.db_path.parent / "known_hosts"
 
     def validate(self) -> None:
+        # Catch an unedited .env before it becomes a confusing Slack API error.
+        # The example file's values are all non-empty and the right shape, so the
+        # generic checks below pass and the first symptom is otherwise an
+        # `invalid_auth` traceback from apps.connections.open.
+        placeholders = {
+            "SLACK_BOT_TOKEN": (self.bot_token, "xoxb-..."),
+            "SLACK_APP_TOKEN": (self.app_token, "xapp-..."),
+            "AUTHORIZED_USER_ID": (self.authorized_user, "U000000000"),
+        }
+        unset = [
+            name
+            for name, (value, example) in placeholders.items()
+            if value == example
+        ]
+        if unset:
+            raise ConfigError(
+                f"{', '.join(unset)} still holds the .env.example placeholder — "
+                "fill in the real values in daemon/.env"
+            )
+
         if not self.vm_ssh_key.is_file():
             raise ConfigError(f"VM_SSH_KEY does not exist: {self.vm_ssh_key}")
         if not self.authorized_user.startswith("U"):
