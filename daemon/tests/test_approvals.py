@@ -17,7 +17,12 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-from slackagent.approvals import ACTION_APPROVE, ACTION_DENY, ApprovalService
+from slackagent.approvals import (
+    ACTION_ALWAYS,
+    ACTION_APPROVE,
+    ACTION_DENY,
+    ApprovalService,
+)
 from slackagent.config import Config
 from slackagent.store import Store
 
@@ -316,6 +321,84 @@ async def scenario_run_ends_first(tmp: Path) -> None:
         store.close()
 
 
+async def scenario_grants(tmp: Path) -> None:
+    print("\n[8] a standing grant answers without a button")
+    store = Store(tmp / "h.sqlite3")
+    slack = FakeSlack()
+    config = make_config(tmp / "h.sqlite3", 19107, timeout_s=30)
+    service = ApprovalService(config, store, slack)
+    await service.start()
+    try:
+        store.add_grant("Bash", "git status", AUTHORIZED)
+        service.register_run("tok8", "C1", "888.1", "sess-8")
+
+        verdict = await post_approve(
+            19107,
+            {"run_token": "tok8", "tool_name": "Bash",
+             "tool_input": {"command": "git status --short"},
+             "tool_use_id": "t8"},
+        )
+        check("granted call is approved", verdict.get("approved") is True, verdict)
+        check("and NOTHING was posted to Slack", len(slack.posted) == 0, slack.posted)
+        check("the reason names the grant", "grant" in verdict.get("reason", ""),
+              verdict.get("reason"))
+        check("the use was counted", store.list_grants()[0].use_count == 1)
+
+        # The bypass must still reach a human even with the grant in place.
+        pending = asyncio.create_task(
+            post_approve(
+                19107,
+                {"run_token": "tok8", "tool_name": "Bash",
+                 "tool_input": {"command": "git status; rm -rf /home/agent"},
+                 "tool_use_id": "t9"},
+            )
+        )
+        await asyncio.sleep(0.4)
+        check("a chained command still asks a human", len(slack.posted) == 1,
+              slack.posted)
+        blocks = slack.posted[0]["blocks"]
+        buttons = [b for b in blocks if b["type"] == "actions"][0]["elements"]
+        labels = [b["text"]["text"] for b in buttons]
+        check("and offers NO 'always allow' button for it",
+              not any("Always" in b for b in labels), labels)
+
+        approval_id = buttons[0]["value"].split("|")[0]
+        body, action = click(ACTION_DENY, approval_id, AUTHORIZED)
+        await service.handle_button(body, action, FakeRespond())
+        v = await asyncio.wait_for(pending, timeout=5)
+        check("chained command denied", v.get("approved") is False)
+
+        # A safe command offers the button, and pressing it creates the grant.
+        slack2 = FakeSlack()
+        service._slack = slack2  # noqa: SLF001 - swapping the fake mid-test
+        pending2 = asyncio.create_task(
+            post_approve(
+                19107,
+                {"run_token": "tok8", "tool_name": "Bash",
+                 "tool_input": {"command": "ls -la /home/agent/work"},
+                 "tool_use_id": "t10"},
+            )
+        )
+        await asyncio.sleep(0.4)
+        buttons = [b for b in slack2.posted[0]["blocks"] if b["type"] == "actions"][0]["elements"]
+        always = next((b for b in buttons if "Always" in b["text"]["text"]), None)
+        check("a safe command offers 'always allow'", always is not None,
+              [b["text"]["text"] for b in buttons])
+        if always:
+            check("the offered pattern is the narrow one",
+                  always["text"]["text"].endswith("ls"), always["text"]["text"])
+            body, action = click(ACTION_ALWAYS, always["value"], AUTHORIZED)
+            action["action_id"] = ACTION_ALWAYS
+            await service.handle_button(body, action, FakeRespond())
+            v = await asyncio.wait_for(pending2, timeout=5)
+            check("pressing it approves this call", v.get("approved") is True, v)
+            patterns = [g.pattern for g in store.list_grants()]
+            check("and creates the grant", "ls" in patterns, patterns)
+    finally:
+        await service.stop()
+        store.close()
+
+
 async def scenario_session_mapping(tmp: Path) -> None:
     print("\n[7] thread -> session mapping")
     store = Store(tmp / "g.sqlite3")
@@ -375,6 +458,7 @@ async def main() -> int:
         await scenario_unknown_token(tmp)
         await scenario_double_click(tmp)
         await scenario_run_ends_first(tmp)
+        await scenario_grants(tmp)
         await scenario_session_mapping(tmp)
 
     print()

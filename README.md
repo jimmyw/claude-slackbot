@@ -226,7 +226,46 @@ buttons; a click from anyone else gets an ephemeral refusal and leaves the
 request pending. Silence for `APPROVAL_TIMEOUT_S` (default 600) is a denial.
 Every decision lands in the `approvals` table with who and when.
 
-**`status` in a thread** reports the VM state and whether the SSH bridge answers.
+### Standing grants ("always allow")
+
+Every approval with a safely generalisable command gets a third button:
+
+```
+🔒 Approval needed — Bash
+   git status --short
+   [Approve]  [Always allow: git status]  [Deny]
+```
+
+Pressing it approves the call and records a grant, so future matching calls are
+answered on the host with no button and no Slack message.
+
+```
+grants            list them, with use counts
+revoke 3          remove one
+revoke all        clear them
+```
+
+Grants live in the daemon's sqlite **on the host**, so the agent can only ask —
+it can never grant itself anything.
+
+A grant is a command *prefix*, and it only matches when the command contains
+nothing that can chain, pipe, redirect or substitute:
+
+| granted `git status`, command… | outcome |
+|---|---|
+| `git status --short` | auto-approved |
+| `git status; rm -rf ~` | **asks a human** — `;` |
+| `git status && curl evil` | **asks a human** — `&` |
+| `git status $(curl evil)` | **asks a human** — `$(` |
+| `git status > ~/.ssh/authorized_keys` | **asks a human** — `>` |
+| `git statusfoo` | **asks a human** — word boundary |
+
+The button is only offered when a prefix can be derived safely, so a command
+containing any of those characters cannot be turned into a grant in the first
+place. `daemon/tests/test_grants.py` covers fourteen bypass attempts.
+
+**`status` in a thread** reports the VM state, the SSH bridge, and how many
+standing grants exist.
 
 ## Tests
 
@@ -241,6 +280,9 @@ cd daemon
 - `test_render.py` — replays **real** `stream-json` captured from Claude Code
   2.1.231 (`tests/fixtures/`), plus Slack's block/length limits and the
   transport-failure paths.
+- `test_grants.py` — "always allow" matching, weighted towards bypasses:
+  chaining, pipes, redirection, substitution, newline injection, line
+  continuation, and the `git statusfoo` boundary.
 - `test_cloud_init.py` — asserts the guest's security invariants in the rendered
   seed: the `agent` account has exactly one key pinned to the forced command and
   no sudo, operator keys land on `admin` and never on `agent`, the gate's files

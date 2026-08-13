@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from .grants import Grant, matches
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
     channel_id   TEXT    NOT NULL,
@@ -41,6 +43,20 @@ CREATE TABLE IF NOT EXISTS approvals (
 
 CREATE INDEX IF NOT EXISTS approvals_by_thread
     ON approvals (channel_id, thread_ts);
+
+-- Persistent "always allow" grants. These live on the HOST, in the daemon's
+-- database, so the agent can never grant itself anything: it asks, and the answer
+-- is computed out here.
+CREATE TABLE IF NOT EXISTS grants (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tool_name    TEXT    NOT NULL,
+    pattern      TEXT    NOT NULL,
+    created_at   INTEGER NOT NULL,
+    created_by   TEXT    NOT NULL,
+    use_count    INTEGER NOT NULL DEFAULT 0,
+    last_used_at INTEGER,
+    UNIQUE (tool_name, pattern)
+);
 """
 
 
@@ -140,6 +156,72 @@ class Store:
                 (int(time.time()), channel_id, thread_ts),
             )
             self._db.commit()
+
+    # -- grants -------------------------------------------------------------
+
+    def add_grant(self, tool_name: str, pattern: str, created_by: str) -> int:
+        """Create a grant, or return the existing one's id. Idempotent."""
+        now = int(time.time())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM grants WHERE tool_name = ? AND pattern = ?",
+                (tool_name, pattern),
+            ).fetchone()
+            if row is not None:
+                return int(row["id"])
+            cursor = self._db.execute(
+                "INSERT INTO grants (tool_name, pattern, created_at, created_by) "
+                "VALUES (?, ?, ?, ?)",
+                (tool_name, pattern, now, created_by),
+            )
+            self._db.commit()
+            return int(cursor.lastrowid or 0)
+
+    def list_grants(self) -> list[Grant]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, tool_name, pattern, created_by, created_at, use_count "
+                "FROM grants ORDER BY tool_name, pattern"
+            ).fetchall()
+        return [
+            Grant(
+                id=int(r["id"]), tool_name=r["tool_name"], pattern=r["pattern"],
+                created_by=r["created_by"], created_at=int(r["created_at"]),
+                use_count=int(r["use_count"]),
+            )
+            for r in rows
+        ]
+
+    def find_grant(self, tool_name: str, tool_input: object) -> Grant | None:
+        """The grant covering this call, if any, counting the use.
+
+        Matching is done in Python rather than SQL because it is not a LIKE: it
+        enforces a word boundary and refuses any command containing shell
+        metacharacters. See grants.matches.
+        """
+        for grant in self.list_grants():
+            if matches(grant.tool_name, grant.pattern, tool_name, tool_input):
+                with self._lock:
+                    self._db.execute(
+                        "UPDATE grants SET use_count = use_count + 1, "
+                        "last_used_at = ? WHERE id = ?",
+                        (int(time.time()), grant.id),
+                    )
+                    self._db.commit()
+                return grant
+        return None
+
+    def revoke_grant(self, grant_id: int) -> bool:
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM grants WHERE id = ?", (grant_id,))
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def revoke_all(self) -> int:
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM grants")
+            self._db.commit()
+            return cursor.rowcount
 
     # -- approvals ----------------------------------------------------------
 
