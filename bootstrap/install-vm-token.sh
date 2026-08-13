@@ -96,25 +96,47 @@ echo "Installed:"
 
 echo
 echo "Checking the CLI accepts it (one small API call):"
-if "${SSH[@]}" "TOKEN_SRC='$TOKEN_PATH' bash -s" <<'REMOTE'
-set -eu
-export PATH="/home/agent/.local/bin:$PATH"
-CLAUDE_CODE_OAUTH_TOKEN="$(sudo cat "$TOKEN_SRC")"
-export CLAUDE_CODE_OAUTH_TOKEN
-# HOME=/tmp so this probe never writes into the agent's real config.
-HOME=/tmp claude -p 'Reply with exactly: AUTHOK' --output-format json < /dev/null \
-  | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-print("  result:", (d.get("result") or "")[:60])
-sys.exit(1 if d.get("is_error") else 0)
-'
-REMOTE
-then
-    echo
-    echo "Token works. The VM can authenticate on its own now."
-else
-    echo
-    echo "The CLI did not accept that token. Run \`claude setup-token\` again and retry." >&2
+
+# As the agent user, not admin. /home/agent is drwx------ agent:agent, so admin
+# cannot even see the binary — running this as admin reports "command not found"
+# and makes a perfectly good token look rejected.
+probe=$("${SSH[@]}" "sudo -u agent -H bash -lc '
+    export PATH=\$HOME/.local/bin:\$PATH
+    if ! command -v claude >/dev/null 2>&1; then echo NO_CLI; exit 0; fi
+    CLAUDE_CODE_OAUTH_TOKEN=\$(cat $TOKEN_PATH) claude -p \"Reply with exactly: AUTHOK\" \
+        --output-format json < /dev/null 2>&1
+'" 2>&1)
+
+if [[ "$probe" == *NO_CLI* ]]; then
+    echo "  Could not run the CLI in the guest — this says nothing about the token." >&2
+    echo "  Check: sudo -u agent -H bash -lc 'claude --version'" >&2
     exit 1
 fi
+
+verdict=$(printf '%s' "$probe" | python3 -c '
+import json, sys
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    print("UNPARSEABLE " + raw.strip()[:160])
+    sys.exit(0)
+print(("ERROR " if d.get("is_error") else "OK ") + (d.get("result") or "")[:80])
+')
+
+case "$verdict" in
+    OK*)
+        echo "  ${verdict#OK }"
+        echo
+        echo "Token works. The VM can authenticate on its own now."
+        ;;
+    ERROR*)
+        echo "  the CLI rejected it: ${verdict#ERROR }" >&2
+        echo "Run \`claude setup-token\` again and retry." >&2
+        exit 1
+        ;;
+    *)
+        echo "  unexpected output: ${verdict#UNPARSEABLE }" >&2
+        exit 1
+        ;;
+esac

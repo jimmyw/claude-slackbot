@@ -198,7 +198,13 @@ cd daemon
   stubbed. Approve creates the file; Deny does not, and the denial shows up in
   the result event. Spends a little API usage.
 
-`--offline` skips only the last one (no API usage, no Claude auth needed).
+- `test_bridge_e2e.py` — the whole chain against a **live VM**, nothing stubbed
+  but Slack: daemon `Bridge` → `ssh -R` → `agent-exec` → `claude -p` → the hook →
+  back through the reverse tunnel → approval → the file really is or is not
+  created in the guest. Opt in with `./tests/run-all.sh --vm <vm-ip>`; needs a
+  provisioned, authenticated VM and spends real API usage.
+
+`--offline` skips the API-spending suites (no Claude auth needed).
 
 ## Verification after setup
 
