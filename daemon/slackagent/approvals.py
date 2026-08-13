@@ -25,7 +25,7 @@ from typing import Any
 from aiohttp import web
 
 from .config import Config
-from .grants import suggest_pattern
+from .grants import ANY, suggest_pattern
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -333,8 +333,14 @@ def _approval_blocks(
                             "type": "button",
                             "text": {
                                 "type": "plain_text",
-                                # Truncated: Slack rejects button text over 75 chars.
-                                "text": f"Always allow: {pattern}"[:75],
+                                # "Always allow: *" tells the operator nothing; name
+                                # the tool instead. Truncated because Slack rejects
+                                # button text over 75 characters.
+                                "text": (
+                                    f"Always allow all {tool_name}"
+                                    if pattern == ANY
+                                    else f"Always allow: {pattern}"
+                                )[:75],
                             },
                             "action_id": ACTION_ALWAYS,
                             "value": f"{approval_id}|{pattern}",

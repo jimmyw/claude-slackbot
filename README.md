@@ -264,6 +264,30 @@ The button is only offered when a prefix can be derived safely, so a command
 containing any of those characters cannot be turned into a grant in the first
 place. `daemon/tests/test_grants.py` covers fourteen bypass attempts.
 
+**Tools with no subject to scope by** — `ToolSearch`, every `mcp__server__tool`,
+`TodoWrite` — are granted whole instead:
+
+```
+🔒 Approval needed — mcp__varys__pulse_command
+   [Approve]  [Always allow all mcp__varys__pulse_command]  [Deny]
+```
+
+That is safe because the tool's *name* is the scope: granting
+`mcp__varys__pulse_command` allows that one tool and nothing else, not
+`mcp__varys__pulse_reboot`. `grants` shows these as `any use`.
+
+**These tools can never be granted wholesale**, because their name does not bound
+what they do:
+
+| tool | why |
+|---|---|
+| `Bash` | arbitrary code |
+| `Write` `Edit` `MultiEdit` `NotebookEdit` | the workspace is already auto-allowed, so an approval means a path *outside* it — including `~/.gitconfig`, whose `core.sshCommand` the forwarded ssh-agent depends on |
+| `WebFetch` | an arbitrary outbound URL is an exfiltration channel |
+
+They only ever get a scoped grant. `matches()` re-checks this, so even a wildcard
+row inserted into the database by hand is refused at match time.
+
 **`status` in a thread** reports the VM state, the SSH bridge, and how many
 standing grants exist.
 

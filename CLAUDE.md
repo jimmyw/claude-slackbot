@@ -119,6 +119,13 @@ sessions.
   so a grant made for a simple command can never cover a compound one.
 - The word boundary is the second half: `git status` must not match
   `git statusfoo`. Match is exact-equal or prefix followed by a space.
+- Tools with no subject field (`ToolSearch`, `mcp__*`, `TodoWrite`) get
+  whole-tool grants with pattern `*`, which is safe because the tool name is the
+  scope — a grant for `mcp__varys__pulse_command` does not cover
+  `mcp__varys__pulse_reboot`. `MUST_BE_SCOPED` names the tools that may never be
+  granted wholesale (`Bash`, the write tools, `WebFetch`), and `matches()` enforces
+  it independently of `suggest_pattern`, so a hand-inserted wildcard row is still
+  refused.
 - Note an earlier claim in this file was wrong: the `approvals` table does NOT
   accommodate grants — it has no expiry, scope or pattern columns. `grants` is a
   separate table.
