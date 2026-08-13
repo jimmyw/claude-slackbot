@@ -28,36 +28,43 @@ fi
 SSH_OPTS=(-i "$ADMIN_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 
 echo "==> Copying vm-files to agent@$VM_HOST"
-rsync -a --info=stats1 \
-    -e "ssh ${SSH_OPTS[*]}" \
-    "$REPO_DIR/vm-files/home/agent/" \
-    "agent@$VM_HOST:/home/agent/"
+# tar rather than rsync: rsync is not installed in the guest and adding it just
+# for this would be a package the agent never otherwise needs.
+tar -C "$REPO_DIR/vm-files/home/agent" -cf - . \
+    | ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" 'tar -C /home/agent -xf - '
 
 echo "==> Installing the forced command"
-scp "${SSH_OPTS[@]}" \
-    "$REPO_DIR/vm-files/usr/local/bin/agent-exec" \
-    "agent@$VM_HOST:/tmp/agent-exec"
-ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" \
-    'sudo install -m 0755 -o root -g root /tmp/agent-exec /usr/local/bin/agent-exec && rm -f /tmp/agent-exec'
+tar -C "$REPO_DIR/vm-files/usr/local/bin" -cf - agent-exec \
+    | ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
+        set -eu
+        tmp="$(mktemp -d)"
+        tar -C "$tmp" -xf -
+        sudo install -m 0755 -o root -g root "$tmp/agent-exec" /usr/local/bin/agent-exec
+        rm -rf "$tmp"
+    '
 
 echo "==> Fixing permissions"
 ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
     set -e
     chmod 0755 /home/agent/.claude/hooks/approve.py
     mkdir -p /home/agent/work /home/agent/memory
-    chown -R agent:agent /home/agent
+    # sudo: cloud-init leaves a couple of root-owned markers (.provisioned) in
+    # /home/agent, and a plain chown -R as the agent user fails on those.
+    sudo chown -R agent:agent /home/agent
 '
 
 echo "==> Verifying the guest side"
 ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
-    set -e
-    echo -n "claude: "; claude --version
-    echo -n "hook:   "; python3 -c "import json,sys; json.load(sys.stdin)" </dev/null 2>/dev/null \
-        && echo "python3 ok" || echo "python3 ok"
-    echo -n "gate fail-closed: "
-    printf "{}" | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= \
-        python3 /home/agent/.claude/hooks/approve.py \
-        | python3 -c "import json,sys; d=json.load(sys.stdin); print(d[\"hookSpecificOutput\"][\"permissionDecision\"])"
+    set -eu
+    # ~/.local/bin is not on PATH for a non-login shell, which is exactly the
+    # environment agent-exec runs in.
+    export PATH="$HOME/.local/bin:$PATH"
+    echo -n "  claude:           "; claude --version
+    echo -n "  agent-exec:       "; test -x /usr/local/bin/agent-exec && echo installed || echo MISSING
+    echo -n "  gate fail-closed: "
+    printf "{\"tool_name\":\"Write\",\"tool_input\":{}}" \
+        | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /home/agent/.claude/hooks/approve.py \
+        | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
 '
 
 echo
