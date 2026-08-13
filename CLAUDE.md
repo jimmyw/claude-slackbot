@@ -83,6 +83,14 @@ Checked against Claude Code 2.1.231 on terra:
   event — so the daemon mints the UUID and writes the mapping *before* the
   CLI starts, rather than parsing it out of the init event.
 - `--resume <uuid>` keeps the same session id and retains context.
+- **`--session-id` is rejected for an id that already exists**:
+  `Error: Session ID <uuid> is already in use.` The session is created on disk at
+  the `system`/`init` event, so a thread must switch to `--resume` the moment
+  init arrives — NOT when the run completes. Keying off `result` looks safer but
+  is worse: a first run that emits init and then dies (dropped transport, killed
+  ssh) would retry `--session-id` on every later message and break that thread
+  permanently. `Store.mark_session_created` carries the reasoning; both
+  directions are covered in `test_approvals.py`.
 - **`--allowedTools` does not restrict the available tool set.** The init
   event still lists every tool. It pre-approves permissions; it is not a
   whitelist. The PreToolUse hook is therefore the *only* gate.

@@ -156,10 +156,12 @@ class Daemon:
         run_token = uuid.uuid4().hex
         self._approvals.register_run(run_token, channel, thread_ts, session.session_id)
 
-        # Only a completed turn makes the session resumable. If the first run dies
-        # before the CLI writes its transcript, counting it would make the next
-        # message --resume a session that never existed.
-        completed = False
+        # The session exists on disk from the `init` event onward, and `claude`
+        # refuses --session-id for an id that already exists. So the moment we see
+        # init, this thread must switch to --resume — even if the run then dies.
+        # Keying off the `result` event instead would leave a crashed first run
+        # retrying --session-id forever and permanently break the thread.
+        session_created = False
 
         try:
             async for event in self._bridge.run(
@@ -168,8 +170,15 @@ class Daemon:
                 resume=not session.is_new,
                 run_token=run_token,
             ):
-                if event.get("type") == "result":
-                    completed = True
+                if (
+                    event.get("type") == "system"
+                    and event.get("subtype") == "init"
+                    and not session_created
+                ):
+                    session_created = True
+                    await asyncio.to_thread(
+                        self._store.mark_session_created, channel, thread_ts
+                    )
                 await renderer.handle(event)
         except Exception:
             log.exception("run failed")
@@ -177,8 +186,6 @@ class Daemon:
         finally:
             self._approvals.unregister_run(run_token)
             await renderer.flush(force=True)
-            if completed:
-                await asyncio.to_thread(self._store.record_turn, channel, thread_ts)
 
     async def _post_status(self, channel: str, thread_ts: str) -> None:
         state = await self._vm.state()

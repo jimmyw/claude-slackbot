@@ -53,7 +53,11 @@ class ThreadSession:
 
     @property
     def is_new(self) -> bool:
-        """True when no turn has completed yet, so --session-id still applies."""
+        """True when the CLI has not yet created this session on disk.
+
+        Drives --session-id vs --resume. Flips as soon as a run emits its `init`
+        event, not when a run completes: see mark_session_created.
+        """
         return self.turns == 0
 
 
@@ -119,7 +123,16 @@ class Store:
             self._db.commit()
             return ThreadSession(channel_id, thread_ts, new_session_id, 0)
 
-    def record_turn(self, channel_id: str, thread_ts: str) -> None:
+    def mark_session_created(self, channel_id: str, thread_ts: str) -> None:
+        """Record that the CLI has created this session on disk.
+
+        Call this when the run's `system`/`init` event arrives, NOT when it
+        finishes. The session exists from `init` onward, and `claude` rejects
+        `--session-id` for an id that already exists ("Session ID ... is already
+        in use"). A run that emits init and then dies must therefore switch the
+        thread to --resume, or every later message retries --session-id against
+        an existing session and the thread is permanently broken.
+        """
         with self._lock:
             self._db.execute(
                 "UPDATE threads SET turns = turns + 1, last_used_at = ? "

@@ -323,7 +323,7 @@ async def scenario_session_mapping(tmp: Path) -> None:
         check("new thread gets the minted uuid", first.session_id == "uuid-aaa")
         check("new thread uses --session-id (not resume)", first.is_new)
 
-        store.record_turn("C1", "777.7")
+        store.mark_session_created("C1", "777.7")
         second = store.get_or_create_session("C1", "777.7", "uuid-bbb")
         check("reply reuses the original session", second.session_id == "uuid-aaa")
         check("reply uses --resume", not second.is_new)
@@ -342,11 +342,25 @@ async def scenario_session_mapping(tmp: Path) -> None:
         check("find_session on a known thread returns it",
               (store.find_session("C1", "777.7") or first).session_id == "uuid-aaa")
 
-        # Regression: a run that dies before producing a result must not be
-        # counted, or the next message would --resume a session that was never
-        # created. record_turn is the only thing that flips is_new.
-        fresh = store.get_or_create_session("C2", "aaa.1", "uuid-ddd")
-        check("a failed first run leaves the thread still 'new'", fresh.is_new)
+        # Regression, both directions of a genuinely nasty pair:
+        #
+        #  * a run that never started must stay --session-id, or we --resume a
+        #    session that does not exist;
+        #  * a run that emitted `init` and THEN died must switch to --resume,
+        #    because claude rejects --session-id for an existing id with
+        #    "Session ID ... is already in use" — verified against 2.1.231 — which
+        #    would break the thread permanently.
+        never_started = store.get_or_create_session("C2", "aaa.1", "uuid-ddd")
+        check("a run that never started stays on --session-id",
+              never_started.is_new)
+
+        store.get_or_create_session("C3", "bbb.1", "uuid-eee")
+        store.mark_session_created("C3", "bbb.1")   # init seen, then the run dies
+        crashed = store.get_or_create_session("C3", "bbb.1", "uuid-fff")
+        check("a run that emitted init then died switches to --resume",
+              not crashed.is_new)
+        check("and keeps its original session id",
+              crashed.session_id == "uuid-eee")
     finally:
         store.close()
 
