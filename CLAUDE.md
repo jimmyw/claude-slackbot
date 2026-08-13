@@ -234,6 +234,10 @@ Checked against Claude Code 2.1.231 on terra:
   focus on implementation.
 - Update the "Still open" section as those items get resolved, rather than
   leaving stale open questions.
+- `daemon/tests/run-all.sh --vm <ip>` adds `test_bridge_e2e.py`, which exercises
+  the real tunnel against a live guest. It is the only test that proves the
+  transport and the gate work *together*; run it after touching agent-exec, the
+  hook, the bridge, or anything in cloud-init.
 - Run `daemon/tests/run-all.sh` before committing. `test_gate_e2e.py` spends
   a little API usage but is the only test that proves the gate actually
   blocks a real Claude Code tool call.

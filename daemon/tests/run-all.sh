@@ -14,7 +14,14 @@ SUITES=(tests.test_approvals tests.test_render tests.test_vmctl)
 if [[ "${1:-}" != "--offline" ]]; then
     SUITES+=(tests.test_gate_e2e)
 else
-    echo "(skipping the end-to-end suite)"
+    echo "(skipping the API-spending suites)"
+fi
+
+# The live-VM suite needs a provisioned, authenticated guest, so it is opt-in:
+#   ./tests/run-all.sh --vm 192.168.122.x
+if [[ "${1:-}" == "--vm" ]]; then
+    [[ -n "${2:-}" ]] || { echo "usage: $0 --vm <vm-ip>" >&2; exit 64; }
+    VM_IP="$2"
 fi
 
 failed=()
@@ -27,6 +34,14 @@ for suite in "${SUITES[@]}"; do
         failed+=("$suite")
     fi
 done
+
+if [[ -n "${VM_IP:-}" ]]; then
+    echo
+    echo "=============================================================="
+    echo " tests.test_bridge_e2e (live VM $VM_IP)"
+    echo "=============================================================="
+    "$PY" -m tests.test_bridge_e2e "$VM_IP" || failed+=(tests.test_bridge_e2e)
+fi
 
 echo
 if (( ${#failed[@]} )); then
