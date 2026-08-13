@@ -1,0 +1,10 @@
+# Public keys for the guest's 'admin' account: interactive access for the
+# operator, over Tailscale or the libvirt bridge. One key per line.
+#
+# These are PUBLIC keys and safe to commit. They go on 'admin' only, never on
+# 'agent' — a shell on the agent account would share the forwarded ssh-agent with
+# whatever the human runs there, and could read the agent's Claude token.
+#
+# Added here rather than by hand because a hand-edited authorized_keys is lost on
+# every VM rebuild, which had already happened twice.
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBbQU3HWtVc37apeIrmGYmxUt9OmkCnHtTP64RWhfZHW jimmy@wennlund.nu

@@ -96,6 +96,12 @@ seed, so the guest is fully provisioned on first boot:
 - `~/.ssh/agent_vm_admin_ed25519` → the **`admin`** account: shell + sudo, for
   maintenance and `claude setup-token`. Never used by the daemon.
 
+Add your own keys to `bootstrap/operator-keys.pub` (public keys, safe to commit,
+one per line) and they are installed on `admin` at every build. Do **not** put a
+key on the `agent` account: a shell there shares the forwarded ssh-agent with
+whatever you run and can read the agent's Claude token. `test_cloud_init.py`
+asserts that.
+
 Two accounts on purpose. With one shared account, the agent inherited `admin`'s
 `NOPASSWD: ALL`, so any single approved `Bash` call was a root shell — and root
 could rewrite the approval gate. The gate's own files
@@ -235,6 +241,11 @@ cd daemon
 - `test_render.py` — replays **real** `stream-json` captured from Claude Code
   2.1.231 (`tests/fixtures/`), plus Slack's block/length limits and the
   transport-failure paths.
+- `test_cloud_init.py` — asserts the guest's security invariants in the rendered
+  seed: the `agent` account has exactly one key pinned to the forced command and
+  no sudo, operator keys land on `admin` and never on `agent`, the gate's files
+  install root-owned, `MEMORY.md` installs agent-owned, and no secret appears in
+  the seed. Two of those had already been broken once.
 - `test_vmctl.py` — guards the `qemu:///session` trap above: every `virsh` call
   must pin `--connect`, plus state mapping and `domifaddr` parsing.
 - `test_gate_e2e.py` — the one that matters: a **real** `claude -p` run through

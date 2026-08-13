@@ -33,6 +33,10 @@ users:
     lock_passwd: true
     ssh_authorized_keys:
       - '@@ADMIN_PUBKEY@@'
+      # Operator keys from bootstrap/operator-keys.pub. On admin only: a shell on
+      # the agent account would share the forwarded ssh-agent with anything the
+      # human runs, and could read the agent's Claude token.
+@@OPERATOR_KEYS@@
 
 package_update: true
 packages:
