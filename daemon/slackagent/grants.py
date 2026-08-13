@@ -30,6 +30,23 @@ from dataclasses import dataclass
 #   \           escaping and line continuation, used to obfuscate the above
 _UNSAFE_SEQUENCES = (";", "&", "|", "`", "$(", ">", "<", "\n", "\r", "\\")
 
+# Tools whose blast radius is not bounded by their name, so a grant for them MUST
+# carry a scope. A whole-tool grant here would be equivalent to removing the gate
+# for that tool:
+#
+#   Bash            arbitrary code
+#   Write/Edit/…    the workspace is already auto-allowed, so an approval for one
+#                   of these means a path OUTSIDE it — including ~/.gitconfig,
+#                   whose core.sshCommand the forwarded ssh-agent depends on
+#   WebFetch        an arbitrary outbound URL is an exfiltration channel
+MUST_BE_SCOPED = frozenset(
+    {"Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch"}
+)
+
+# Grants for a tool with no meaningful subject use this as their pattern, meaning
+# "any invocation of this tool".
+ANY = "*"
+
 # The field that identifies what a tool is being asked to act on.
 _SUBJECT_KEYS = {
     "Bash": "command",
@@ -59,19 +76,25 @@ def subject(tool_name: str, tool_input: object) -> str | None:
         return None
     key = _SUBJECT_KEYS.get(tool_name)
     if key is None:
-        # An unknown tool has no agreed subject, so it can never be granted.
-        # Failing closed here means a new tool type is gated until someone
-        # deliberately teaches this module about it.
         return None
     value = tool_input.get(key)
     return value if isinstance(value, str) and value else None
 
 
 def is_grantable(tool_name: str, tool_input: object) -> bool:
-    """Whether this call could be covered by a prefix grant at all."""
-    text = subject(tool_name, tool_input)
-    if text is None:
+    """Whether this call could be covered by a grant at all."""
+    if not tool_name or tool_name == "<unknown>":
         return False
+
+    text = subject(tool_name, tool_input)
+
+    if text is None:
+        # No subject to scope by — ToolSearch, mcp__server__tool, and anything
+        # else whose name already says what it does. These are grantable as a
+        # whole, which is safe precisely because the name bounds them: granting
+        # mcp__varys__pulse_command allows that one tool and nothing else.
+        return tool_name not in MUST_BE_SCOPED
+
     if tool_name == "Bash":
         return not any(seq in text for seq in _UNSAFE_SEQUENCES)
     return True
@@ -88,6 +111,14 @@ def matches(grant_tool: str, grant_pattern: str, tool_name: str, tool_input: obj
         return False
     if not is_grantable(tool_name, tool_input):
         return False
+
+    if grant_pattern == ANY:
+        # Defensive: refuse a wildcard for a tool that must be scoped, even if such
+        # a row reached the database some other way (a hand-edit, a future bug).
+        # The check that creates grants is not the only thing standing between a
+        # wildcard and arbitrary code.
+        return tool_name not in MUST_BE_SCOPED
+
     text = subject(tool_name, tool_input)
     if text is None or not grant_pattern:
         return False
@@ -113,7 +144,9 @@ def suggest_pattern(tool_name: str, tool_input: object) -> str | None:
         return None
     text = subject(tool_name, tool_input)
     if text is None:
-        return None
+        # Whole-tool grant: there is nothing to scope by, and the tool name is
+        # itself the scope.
+        return ANY
 
     if tool_name != "Bash":
         return text
