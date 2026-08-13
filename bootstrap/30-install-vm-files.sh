@@ -27,34 +27,41 @@ if [[ ! -f "$ADMIN_KEY" ]]; then
 fi
 SSH_OPTS=(-i "$ADMIN_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new)
 
-echo "==> Copying vm-files to agent@$VM_HOST"
 # tar rather than rsync: rsync is not installed in the guest and adding it just
-# for this would be a package the agent never otherwise needs.
-tar -C "$REPO_DIR/vm-files/home/agent" -cf - . \
-    | ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" 'tar -C /home/agent -xf - '
-
-echo "==> Installing the forced command"
-tar -C "$REPO_DIR/vm-files/usr/local/bin" -cf - agent-exec \
-    | ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
+# for this would be a package the agent never otherwise needs. Everything is
+# unpacked to a staging dir first, then installed with explicit ownership — the
+# gate's files must land root-owned, not owned by the identity they constrain.
+echo "==> Shipping vm-files to admin@$VM_HOST"
+tar -C "$REPO_DIR/vm-files" -cf - etc home usr \
+    | ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
         set -eu
-        tmp="$(mktemp -d)"
-        tar -C "$tmp" -xf -
-        sudo install -m 0755 -o root -g root "$tmp/agent-exec" /usr/local/bin/agent-exec
-        rm -rf "$tmp"
+        rm -rf /tmp/vmfiles && mkdir -p /tmp/vmfiles
+        tar -C /tmp/vmfiles -xf -
+
+        # Root-owned: the agent must not be able to edit its own gate.
+        sudo install -D -m 0755 -o root -g root \
+            /tmp/vmfiles/etc/claude-agent/approve.py /etc/claude-agent/approve.py
+        sudo install -D -m 0644 -o root -g root \
+            /tmp/vmfiles/etc/claude-agent/settings.json /etc/claude-agent/settings.json
+        sudo install -D -m 0644 -o root -g root \
+            /tmp/vmfiles/home/agent/CLAUDE.md /home/agent/CLAUDE.md
+        sudo install -D -m 0755 -o root -g root \
+            /tmp/vmfiles/usr/local/bin/agent-exec /usr/local/bin/agent-exec
+
+        # The one thing the agent needs to write. Never clobber an existing
+        # MEMORY.md — it is the only state that survives between sessions.
+        if [ ! -f /home/agent/memory/MEMORY.md ]; then
+            sudo install -D -m 0644 -o agent -g agent \
+                /tmp/vmfiles/home/agent/memory/MEMORY.md /home/agent/memory/MEMORY.md
+        else
+            echo "    keeping existing memory/MEMORY.md"
+        fi
+
+        rm -rf /tmp/vmfiles
     '
 
-echo "==> Fixing permissions"
-ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
-    set -e
-    chmod 0755 /home/agent/.claude/hooks/approve.py
-    mkdir -p /home/agent/work /home/agent/memory
-    # sudo: cloud-init leaves a couple of root-owned markers (.provisioned) in
-    # /home/agent, and a plain chown -R as the agent user fails on those.
-    sudo chown -R agent:agent /home/agent
-'
-
 echo "==> Verifying the guest side"
-ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
+ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
     set -eu
     # ~/.local/bin is not on PATH for a non-login shell, which is exactly the
     # environment agent-exec runs in.
@@ -63,7 +70,7 @@ ssh "${SSH_OPTS[@]}" "agent@$VM_HOST" '
     echo -n "  agent-exec:       "; test -x /usr/local/bin/agent-exec && echo installed || echo MISSING
     echo -n "  gate fail-closed: "
     printf "{\"tool_name\":\"Write\",\"tool_input\":{}}" \
-        | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /home/agent/.claude/hooks/approve.py \
+        | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py \
         | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
 '
 

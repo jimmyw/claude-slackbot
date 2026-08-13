@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /home/agent/.claude/hooks/approve.py",
+            "command": "python3 /etc/claude-agent/approve.py",
             "timeout": 900
           }
         ]

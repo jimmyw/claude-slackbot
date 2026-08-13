@@ -21,7 +21,7 @@ fi
 
 COMMON=(-o IdentitiesOnly=yes -o BatchMode=yes
         -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10)
-ADMIN_SSH=(ssh -i "$ADMIN_KEY" "${COMMON[@]}" "agent@$VM_HOST")
+ADMIN_SSH=(ssh -i "$ADMIN_KEY" "${COMMON[@]}" "admin@$VM_HOST")
 DAEMON_SSH=(ssh -i "$DAEMON_KEY" "${COMMON[@]}" "agent@$VM_HOST")
 
 pass=0
@@ -50,41 +50,65 @@ done
 
 echo "[3] Claude Code reachable in a NON-login shell"
 # This is the environment agent-exec actually runs in.
-if version=$("${ADMIN_SSH[@]}" 'export PATH="$HOME/.local/bin:$PATH"; claude --version' 2>/dev/null); then
+if version=$("${ADMIN_SSH[@]}" 'sudo -u agent -H bash -c '"'"'export PATH=$HOME/.local/bin:$PATH; claude --version'"'"'' 2>/dev/null); then
     report "claude --version" ok "$version"
 else
-    report "claude --version" no "not found with ~/.local/bin on PATH"
+    report "claude --version" no "not found as user agent with ~/.local/bin on PATH"
 fi
 
-echo "[4] provisioned files"
+echo "[4] provisioned files — the gate must NOT be agent-writable"
+file_checks=0
 while read -r mode owner path; do
     case "$path" in
-        /usr/local/bin/agent-exec)
-            [[ "$owner" == "root:root" && "$mode" == "-rwxr-xr-x" ]] \
-                && report "agent-exec $mode $owner" ok \
-                || report "agent-exec perms" no "$mode $owner"
+        /etc/claude-agent/*|/usr/local/bin/agent-exec|/home/agent/CLAUDE.md)
+            file_checks=$((file_checks + 1))
+            # The identity a control constrains must not be able to edit it.
+            [[ "$owner" == "root:root" ]] \
+                && report "$(basename "$path") root-owned" ok "$mode" \
+                || report "$(basename "$path") root-owned" no "owned by $owner"
             ;;
-        *approve.py)
-            [[ "$owner" == "agent:agent" && "$mode" == -rwx* ]] \
-                && report "approve.py $mode $owner" ok \
-                || report "approve.py perms" no "$mode $owner"
-            ;;
-        *)
+        *MEMORY.md)
+            file_checks=$((file_checks + 1))
+            # The one thing the agent must be able to write.
             [[ "$owner" == "agent:agent" ]] \
-                && report "$(basename "$path") $owner" ok \
-                || report "$(basename "$path") owner" no "$owner"
+                && report "MEMORY.md agent-writable" ok "$mode" \
+                || report "MEMORY.md agent-writable" no "owned by $owner"
             ;;
     esac
-done < <("${ADMIN_SSH[@]}" 'stat -c "%A %U:%G %n" /usr/local/bin/agent-exec \
-    /home/agent/.claude/hooks/approve.py /home/agent/.claude/settings.json \
-    /home/agent/CLAUDE.md /home/agent/memory/MEMORY.md 2>/dev/null')
+done < <("${ADMIN_SSH[@]}" 'sudo stat -c "%A %U:%G %n" /usr/local/bin/agent-exec \
+    /etc/claude-agent/approve.py /etc/claude-agent/settings.json \
+    /home/agent/CLAUDE.md /home/agent/memory/MEMORY.md')
+
+# A missing file must fail, not vanish. Five paths are stat'd above; anything less
+# means one did not exist and its check silently never ran.
+expected_files=5
+[[ "$file_checks" -eq "$expected_files" ]] \
+    && report "all $expected_files provisioned files present" ok \
+    || report "provisioned file count" no "checked $file_checks of $expected_files"
+
+# Ownership alone is not the claim; not-writable-by-agent is. Test it directly.
+for target in /etc/claude-agent/settings.json /etc/claude-agent/approve.py \
+              /usr/local/bin/agent-exec; do
+    if "${ADMIN_SSH[@]}" "sudo -u agent test -w $target" 2>/dev/null; then
+        report "agent cannot write $(basename "$target")" no "IT CAN"
+    else
+        report "agent cannot write $(basename "$target")" ok
+    fi
+done
+
+echo "[4b] the agent account has no sudo"
+if "${ADMIN_SSH[@]}" 'sudo -u agent sudo -n true' 2>/dev/null; then
+    report "agent has no passwordless sudo" no "IT DOES"
+else
+    report "agent has no passwordless sudo" ok
+fi
 
 echo "[5] the approval hook fails closed"
-decision=$("${ADMIN_SSH[@]}" 'printf "{\"tool_name\":\"Write\",\"tool_input\":{}}" | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /home/agent/.claude/hooks/approve.py | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"' 2>/dev/null || echo error)
+decision=$("${ADMIN_SSH[@]}" 'printf "{\"tool_name\":\"Write\",\"tool_input\":{}}" | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"' 2>/dev/null || echo error)
 [[ "$decision" == "deny" ]] && report "unwired gate denies" ok "$decision" \
                             || report "unwired gate denies" no "$decision"
 
-decision=$("${ADMIN_SSH[@]}" 'printf "{\"tool_name\":\"Read\",\"tool_input\":{}}" | AGENT_APPROVAL_URL=x AGENT_RUN_TOKEN=y python3 /home/agent/.claude/hooks/approve.py | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"' 2>/dev/null || echo error)
+decision=$("${ADMIN_SSH[@]}" 'printf "{\"tool_name\":\"Read\",\"tool_input\":{}}" | AGENT_APPROVAL_URL=x AGENT_RUN_TOKEN=y python3 /etc/claude-agent/approve.py | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"' 2>/dev/null || echo error)
 [[ "$decision" == "allow" ]] && report "Read auto-allowed" ok "$decision" \
                             || report "Read auto-allowed" no "$decision"
 

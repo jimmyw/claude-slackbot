@@ -9,19 +9,29 @@ hostname: agent-vm
 fqdn: agent-vm.local
 preserve_hostname: false
 
+# Two users, deliberately. Putting the admin key on the agent account gave the
+# agent NOPASSWD:ALL sudo, so any single approved Bash call was a root shell —
+# and root could rewrite the approval gate itself. Maintenance and execution are
+# now separate identities.
 users:
+  # Runs Claude Code. No sudo, no shell: the daemon key is pinned to a forced
+  # command that can feed a JSON job to the CLI runner and nothing else. The -R
+  # the daemon needs for the approval tunnel still works.
   - name: agent
+    # sshd runs a ForceCommand through the account's shell, so this must be a
+    # real shell. Confinement comes from the forced command, not from here.
+    shell: /bin/bash
+    lock_passwd: true
+    ssh_authorized_keys:
+      - 'command="/usr/local/bin/agent-exec",no-agent-forwarding,no-X11-forwarding,no-pty @@AGENT_PUBKEY@@'
+
+  # Maintenance only: `claude setup-token`, pushing updated vm-files, poking
+  # around. Never used by the daemon.
+  - name: admin
     shell: /bin/bash
     sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     lock_passwd: true
     ssh_authorized_keys:
-      # The daemon key is pinned to a forced command: it can feed a JSON job to
-      # the CLI runner and nothing else. No shell, no agent/X11 forwarding. The
-      # -R the daemon needs for the approval tunnel still works.
-      - 'command="/usr/local/bin/agent-exec",no-agent-forwarding,no-X11-forwarding,no-pty @@AGENT_PUBKEY@@'
-      # The admin key gets a normal shell. Required for `claude setup-token` and
-      # for pushing updated vm-files later — without it a fresh VM is
-      # unreachable, since the key above cannot run rsync or open a shell.
       - '@@ADMIN_PUBKEY@@'
 
 package_update: true
@@ -61,7 +71,7 @@ write_files:
 runcmd:
   # Ownership first: write_files runs before users-groups exists, so the staged
   # copies are root-owned and get installed into place here instead.
-  - ["mkdir", "-p", "/home/agent/.claude/hooks", "/home/agent/memory", "/home/agent/work"]
+  - ["mkdir", "-p", "/etc/claude-agent", "/home/agent/memory", "/home/agent/work"]
 @@INSTALL_FILES@@
   # Ownership BEFORE the installer: the mkdir above runs as root and `install`
   # only sets ownership on the files it writes, not on parent directories it
@@ -72,10 +82,13 @@ runcmd:
   # needed in the guest. It lands in ~/.local/bin.
   # -f makes curl fail loudly on an HTTP error, and `set -o pipefail` means a
   # failed download does not silently feed an empty script into bash.
-  - ["su", "-l", "agent", "-c", "set -o pipefail; curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh | bash"]
+  - ["su", "-s", "/bin/bash", "agent", "-c", "set -o pipefail; cd /home/agent && HOME=/home/agent curl -fsSL --retry 3 --retry-connrefused https://claude.ai/install.sh | bash"]
   - ["chown", "-R", "agent:agent", "/home/agent"]
-  # Fail the boot loudly rather than leaving a VM that looks fine but has no CLI.
-  - ["su", "-l", "agent", "-c", "command -v claude && claude --version"]
+  # Re-assert root ownership of the instruction file: the chown above is a
+  # blunt -R over /home/agent and would otherwise hand CLAUDE.md back.
+  - ["chown", "root:root", "/home/agent/CLAUDE.md"]
+  # The agent account has no interactive login, so verify as root with its PATH.
+  - ["su", "-s", "/bin/bash", "agent", "-c", "PATH=/home/agent/.local/bin:$PATH claude --version"]
   - ["rm", "-rf", "/var/lib/agent-provision"]
   - ["systemctl", "restart", "ssh"]
   # Leave a marker the host can check to confirm provisioning finished.
