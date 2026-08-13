@@ -37,6 +37,9 @@ users:
 package_update: true
 packages:
   - git
+  # rsync is needed by 40-sync-repos.sh: the host holds the GitHub credential and
+  # syncs working copies in, which for 20-30 repos is repeated multi-GB transfers.
+  - rsync
   - jq
   - ripgrep
   - curl
@@ -89,6 +92,11 @@ runcmd:
   - ["chown", "root:root", "/home/agent/CLAUDE.md"]
   # The agent account has no interactive login, so verify as root with its PATH.
   - ["su", "-s", "/bin/bash", "agent", "-c", "PATH=/home/agent/.local/bin:$PATH claude --version"]
+  # review-agent-work.sh fetches the agent's commits over ssh as admin, and
+  # git-upload-pack then runs as admin against an agent-owned repo, which
+  # safe.directory refuses. admin already has full sudo, so this grants it
+  # nothing it lacked.
+  - ["su", "-l", "admin", "-c", "git config --global --add safe.directory '*'"]
   - ["rm", "-rf", "/var/lib/agent-provision"]
   - ["systemctl", "restart", "ssh"]
   # Leave a marker the host can check to confirm provisioning finished.
