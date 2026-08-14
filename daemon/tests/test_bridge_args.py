@@ -80,6 +80,7 @@ def make_config(tmp: Path, forward_agent: bool = False) -> Config:
     key.write_text("x")
     return Config(
         bot_token="xoxb-real", app_token="xapp-real", authorized_user="U1",
+        allowed_users=frozenset(),
         vm_host="10.9.9.9", vm_user="agent", vm_ssh_key=key,
         vm_domain="agent-vm", vm_workdir="/home/agent/work",
         libvirt_uri="qemu:///system",

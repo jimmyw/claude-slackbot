@@ -36,7 +36,11 @@ class Config:
     # Slack
     bot_token: str
     app_token: str
+    # The APPROVER. Only this user may press Approve/Deny or manage grants.
     authorized_user: str
+    # Who may TALK to the bot. Empty means anyone in a channel it is invited
+    # to, which is the deliberate default: an invite is the grant.
+    allowed_users: frozenset[str]
 
     # VM bridge
     vm_host: str
@@ -68,6 +72,11 @@ class Config:
             bot_token=_required("SLACK_BOT_TOKEN"),
             app_token=_required("SLACK_APP_TOKEN"),
             authorized_user=_required("AUTHORIZED_USER_ID"),
+            allowed_users=frozenset(
+                u.strip()
+                for u in os.environ.get("ALLOWED_USERS", "").split(",")
+                if u.strip()
+            ),
             vm_host=_required("VM_HOST"),
             vm_user=os.environ.get("VM_USER", "agent"),
             vm_ssh_key=Path(

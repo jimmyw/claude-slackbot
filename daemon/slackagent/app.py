@@ -153,15 +153,38 @@ class Daemon:
                 )
                 return
 
-        if user != self._config.authorized_user:
+        is_operator = user == self._config.authorized_user
+
+        # Anyone in a channel the bot was invited to may talk: the invite is the
+        # grant. A DM is not such a channel — any workspace member can open one —
+        # so DMs stay with the operator, or the audience would be the whole
+        # workspace rather than the people deliberately given access.
+        if event.get("channel_type") == "im" and not is_operator:
             await self._app.client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
+                channel=channel, thread_ts=thread_ts,
                 text=(
-                    ":no_entry: Only the authorized operator can drive this agent."
+                    ":no_entry: I only take direct messages from "
+                    f"<@{self._config.authorized_user}>. Mention me in a channel "
+                    "we are both in instead."
                 ),
             )
-            log.warning("ignored message from unauthorized user %s", user)
+            log.warning("refused DM from non-operator %s", user)
+            return
+
+        # An explicit allowlist, when configured, narrows it further.
+        if (
+            self._config.allowed_users
+            and not is_operator
+            and user not in self._config.allowed_users
+        ):
+            await self._app.client.chat_postMessage(
+                channel=channel, thread_ts=thread_ts,
+                text=(
+                    ":no_entry: You are not on this agent's allowlist. Ask "
+                    f"<@{self._config.authorized_user}> to add you."
+                ),
+            )
+            log.warning("refused message from %s (not on ALLOWED_USERS)", user)
             return
 
         command = text.lower().lstrip("!").strip()
@@ -172,16 +195,29 @@ class Daemon:
             await self._post_grants(channel, thread_ts)
             return
         if command.startswith("revoke"):
+            # Changing what runs without asking is an operator action, not
+            # something a guest in the channel should be able to do.
+            if not is_operator:
+                await self._app.client.chat_postMessage(
+                    channel=channel, thread_ts=thread_ts,
+                    text=(
+                        f":no_entry: Only <@{self._config.authorized_user}> can "
+                        "change grants."
+                    ),
+                )
+                return
             await self._revoke(channel, thread_ts, command, user or "")
             return
 
         lock = self._thread_locks[(channel, thread_ts)]
         async with lock:
-            await self._run_turn(channel, thread_ts, text)
+            await self._run_turn(channel, thread_ts, text, user or "")
 
     # -- the turn -----------------------------------------------------------
 
-    async def _run_turn(self, channel: str, thread_ts: str, prompt: str) -> None:
+    async def _run_turn(
+        self, channel: str, thread_ts: str, prompt: str, requested_by: str = ""
+    ) -> None:
         session = await asyncio.to_thread(
             self._store.get_or_create_session, channel, thread_ts, str(uuid.uuid4())
         )
@@ -205,7 +241,11 @@ class Daemon:
             await asyncio.sleep(20)
 
         run_token = uuid.uuid4().hex
-        self._approvals.register_run(run_token, channel, thread_ts, session.session_id)
+        self._approvals.register_run(
+            run_token, channel, thread_ts, session.session_id, requested_by
+        )
+        if requested_by and requested_by != self._config.authorized_user:
+            log.info("run requested by guest %s in %s", requested_by, channel)
 
         # The session exists on disk from the `init` event onward, and `claude`
         # refuses --session-id for an id that already exists. So the moment we see

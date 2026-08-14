@@ -74,6 +74,7 @@ def make_config(db_path: Path, port: int, timeout_s: int) -> Config:
         bot_token="xoxb-fake",
         app_token="xapp-fake",
         authorized_user=AUTHORIZED,
+        allowed_users=frozenset(),
         vm_host="127.0.0.1",
         vm_user="agent",
         vm_ssh_key=key,
@@ -321,6 +322,81 @@ async def scenario_run_ends_first(tmp: Path) -> None:
         store.close()
 
 
+async def scenario_guest_attribution(tmp: Path) -> None:
+    print("\n[9] a guest may ask; only the operator may approve")
+    store = Store(tmp / "i.sqlite3")
+    slack = FakeSlack()
+    config = make_config(tmp / "i.sqlite3", 19108, timeout_s=30)
+    service = ApprovalService(config, store, slack)
+    await service.start()
+    try:
+        # A run started by someone who is not the approver.
+        service.register_run("tok9", "C1", "999.1", "sess-9", requested_by=INTRUDER)
+        pending = asyncio.create_task(
+            post_approve(
+                19108,
+                {"run_token": "tok9", "tool_name": "Bash",
+                 "tool_input": {"command": "npm test"}, "tool_use_id": "t9"},
+            )
+        )
+        await asyncio.sleep(0.4)
+
+        blocks = slack.posted[0]["blocks"]
+        heading = blocks[0]["text"]["text"]
+        check("the approval names who requested it",
+              INTRUDER in heading, heading)
+        approval_id = [b for b in blocks if b["type"] == "actions"][0]["elements"][0]["value"]
+
+        row = store.approval(approval_id)
+        check("the audit row records the requester",
+              row["requested_by"] == INTRUDER, row["requested_by"])
+
+        # The guest cannot approve their own request.
+        respond = FakeRespond()
+        body, action = click(ACTION_APPROVE, approval_id, INTRUDER)
+        await service.handle_button(body, action, respond)
+        check("the guest's own click is refused",
+              store.approval(approval_id)["state"] == "pending")
+        check("and the refusal names the operator",
+              AUTHORIZED in respond.messages[0]["text"], respond.messages[0]["text"])
+        check("the guest's request is still waiting", not pending.done())
+
+        # The operator decides.
+        body, action = click(ACTION_APPROVE, approval_id, AUTHORIZED)
+        await service.handle_button(body, action, FakeRespond())
+        verdict = await asyncio.wait_for(pending, timeout=5)
+        check("the operator can approve a guest's request",
+              verdict.get("approved") is True, verdict)
+        final = store.approval(approval_id)
+        check("audit keeps BOTH who asked and who decided",
+              final["requested_by"] == INTRUDER and final["resolved_by"] == AUTHORIZED,
+              (final["requested_by"], final["resolved_by"]))
+
+        # An operator's own run is not labelled as someone else's.
+        slack2 = FakeSlack()
+        service._slack = slack2  # noqa: SLF001
+        service.register_run("tok10", "C1", "999.2", "sess-10",
+                             requested_by=AUTHORIZED)
+        own = asyncio.create_task(
+            post_approve(
+                19108,
+                {"run_token": "tok10", "tool_name": "Bash",
+                 "tool_input": {"command": "npm test"}, "tool_use_id": "t10"},
+            )
+        )
+        await asyncio.sleep(0.4)
+        check("the operator's own request has no 'requested by' line",
+              "requested by" not in slack2.posted[0]["blocks"][0]["text"]["text"],
+              slack2.posted[0]["blocks"][0]["text"]["text"])
+        aid = [b for b in slack2.posted[0]["blocks"] if b["type"] == "actions"][0]["elements"][0]["value"]
+        body, action = click(ACTION_DENY, aid, AUTHORIZED)
+        await service.handle_button(body, action, FakeRespond())
+        await asyncio.wait_for(own, timeout=5)
+    finally:
+        await service.stop()
+        store.close()
+
+
 async def scenario_grants(tmp: Path) -> None:
     print("\n[8] a standing grant answers without a button")
     store = Store(tmp / "h.sqlite3")
@@ -463,6 +539,7 @@ async def main() -> int:
         await scenario_unknown_token(tmp)
         await scenario_double_click(tmp)
         await scenario_run_ends_first(tmp)
+        await scenario_guest_attribution(tmp)
         await scenario_grants(tmp)
         await scenario_session_mapping(tmp)
 

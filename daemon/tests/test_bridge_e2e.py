@@ -88,6 +88,7 @@ def make_config(vm_host: str, db: Path, port: int) -> Config:
         bot_token="xoxb-fake",
         app_token="xapp-fake",
         authorized_user="U_JIMMY",
+        allowed_users=frozenset(),
         vm_host=vm_host,
         vm_user="agent",
         vm_ssh_key=Path("~/.ssh/agent_vm_ed25519").expanduser(),

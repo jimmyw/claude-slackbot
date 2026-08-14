@@ -42,6 +42,7 @@ class PendingRun:
     channel_id: str
     thread_ts: str
     session_id: str
+    requested_by: str = ""
     approval_ids: set[str] = field(default_factory=set)
 
 
@@ -67,9 +68,12 @@ class ApprovalService:
     # -- run registration ---------------------------------------------------
 
     def register_run(
-        self, run_token: str, channel_id: str, thread_ts: str, session_id: str
+        self, run_token: str, channel_id: str, thread_ts: str, session_id: str,
+        requested_by: str = "",
     ) -> None:
-        self._runs[run_token] = PendingRun(channel_id, thread_ts, session_id)
+        self._runs[run_token] = PendingRun(
+            channel_id, thread_ts, session_id, requested_by
+        )
 
     def unregister_run(self, run_token: str) -> None:
         """Drop a finished run and fail any approval still waiting on it."""
@@ -150,6 +154,7 @@ class ApprovalService:
             tool_name,
             json.dumps(tool_input, ensure_ascii=False),
             body.get("tool_use_id"),
+            run.requested_by,
         )
 
         future: asyncio.Future[Verdict] = asyncio.get_running_loop().create_future()
@@ -164,7 +169,15 @@ class ApprovalService:
                 channel=run.channel_id,
                 thread_ts=run.thread_ts,
                 text=f"Approval needed: {tool_name}",
-                blocks=_approval_blocks(approval_id, tool_name, tool_input, hint),
+                blocks=_approval_blocks(
+                    approval_id, tool_name, tool_input, hint,
+                    requester=(
+                        run.requested_by
+                        if run.requested_by
+                        and run.requested_by != self._config.authorized_user
+                        else None
+                    ),
+                ),
             )
             message_ts = posted["ts"]
             await asyncio.to_thread(
@@ -227,8 +240,9 @@ class ApprovalService:
                 {
                     "response_type": "ephemeral",
                     "text": (
-                        ":no_entry: Only the authorized operator can approve or "
-                        "deny tool calls. This request is still pending."
+                        f":no_entry: Only <@{self._config.authorized_user}> can "
+                        "approve or deny tool calls. Your request is still "
+                        "pending — they will see it in this thread."
                     ),
                 }
             )
@@ -322,15 +336,18 @@ def _granted_suffix(tool_name: str, hint: Any) -> str:
 
 
 def _approval_blocks(
-    approval_id: str, tool_name: str, tool_input: Any, hint: Any = None
+    approval_id: str, tool_name: str, tool_input: Any, hint: Any = None,
+    requester: str | None = None,
 ) -> list[dict]:
+    # Naming the requester is the point of letting guests talk: the approver has to
+    # be able to see that this action is not their own.
+    heading = f":lock: *Approval needed* — `{tool_name}`"
+    if requester:
+        heading += f"\nrequested by <@{requester}>"
     return [
         {
             "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f":lock: *Approval needed* — `{tool_name}`",
-            },
+            "text": {"type": "mrkdwn", "text": heading},
         },
         {
             "type": "section",

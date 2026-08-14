@@ -108,6 +108,24 @@ sessions.
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
 
+## Who can do what
+
+- **Requesting and approving are separate roles.** Anyone in a channel the bot is
+  invited to may talk to it; only `AUTHORIZED_USER_ID` may press Approve/Deny or
+  run `revoke`. Their approval message is labelled `requested by @them`, and
+  `approvals` records `requested_by` alongside `resolved_by`.
+- **DMs remain operator-only** on purpose: any workspace member can open a DM, so
+  guest DMs would widen the audience from "people invited to a channel" to "the
+  whole workspace".
+- **The read exposure is the part to watch.** `Read`/`Grep`/`Glob` are auto-allowed,
+  so anyone who can talk to the bot can read every file in `/home/agent/work`,
+  private repos included, and have it printed into Slack. Approval buttons do not
+  constrain this at all. `ALLOWED_USERS` narrows who can talk; tightening the
+  auto-allow list to the workspace would narrow what they can read, and has not
+  been done.
+- Guests can also spend API budget, and a long thread costs more per turn (see the
+  cache note above). There is no per-user rate limit.
+
 ## Standing grants
 
 - Grants are `(tool_name, prefix)` in the daemon's sqlite **on the host**, so the
