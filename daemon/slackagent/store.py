@@ -34,6 +34,10 @@ CREATE TABLE IF NOT EXISTS approvals (
     tool_name       TEXT NOT NULL,
     tool_input_json TEXT,
     tool_use_id     TEXT,
+    -- Who asked. Distinct from resolved_by, which is who decided: with guests able
+    -- to talk to the bot, an audit row naming only the approver loses the fact that
+    -- someone else requested the action.
+    requested_by    TEXT,
     state           TEXT NOT NULL
         CHECK (state IN ('pending', 'approved', 'denied', 'timeout')),
     requested_at    INTEGER NOT NULL,
@@ -246,12 +250,13 @@ class Store:
         tool_name: str,
         tool_input_json: str,
         tool_use_id: str | None,
+        requested_by: str | None = None,
     ) -> None:
         with self._lock:
             self._db.execute(
                 "INSERT INTO approvals (id, channel_id, thread_ts, session_id, "
-                "tool_name, tool_input_json, tool_use_id, state, requested_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                "tool_name, tool_input_json, tool_use_id, requested_by, state, "
+                "requested_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
                 (
                     approval_id,
                     channel_id,
@@ -260,6 +265,7 @@ class Store:
                     tool_name,
                     tool_input_json,
                     tool_use_id,
+                    requested_by,
                     int(time.time()),
                 ),
             )

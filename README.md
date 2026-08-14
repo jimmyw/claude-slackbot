@@ -221,10 +221,34 @@ repository — so each gets an SSH `Host` alias and you clone via the alias.
 The agent can commit locally but cannot push: the deploy keys are read-only, and
 its `CLAUDE.md` tells it not to waste a gated call trying.
 
+### Who can do what
+
+| | talk to it | approve | manage grants |
+|---|---|---|---|
+| `AUTHORIZED_USER_ID` | yes, channels and DM | **yes** | yes |
+| anyone in a channel it's invited to | yes | no | no |
+| anyone else | no | no | no |
+
+**Anyone in a channel the bot is invited to can talk to it** — the invite is the
+grant. Their requests run, and anything not pre-approved asks *you*, labelled
+`requested by @them`. The `approvals` table records both who asked
+(`requested_by`) and who decided (`resolved_by`).
+
+**Read this before inviting the bot anywhere:** `Read`, `Grep` and `Glob` run with
+**no approval at all**, so anyone who can talk to the bot can read any file in
+`/home/agent/work` and have it printed into Slack — every cloned private repo
+included. Letting someone talk to the bot is granting them read access to that
+workspace. Narrow it with `ALLOWED_USERS` if that is not what you want.
+
+**DMs stay with the operator.** Any workspace member can open a DM with the bot, so
+allowing guest DMs would mean the whole workspace rather than the people you
+deliberately invited. Guests are told to use a channel.
+
 **Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
-buttons; a click from anyone else gets an ephemeral refusal and leaves the
-request pending. Silence for `APPROVAL_TIMEOUT_S` (default 600) is a denial.
-Every decision lands in the `approvals` table with who and when.
+buttons; a click from anyone else gets an ephemeral refusal naming the operator and
+leaves the request pending. `revoke` is operator-only too — a guest changing what
+runs unattended would defeat the point. Silence for `APPROVAL_TIMEOUT_S`
+(default 600) is a denial.
 
 ### Standing grants ("always allow")
 
