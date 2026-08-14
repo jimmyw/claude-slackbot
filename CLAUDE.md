@@ -173,9 +173,12 @@ One module per command in `slackagent/commands/`, discovered with
 
 ## Bash policy (permissive)
 
-Set in the root-owned guest hook, selected by `AGENT_POLICY` (`permissive`
-default, `strict` to ask for every Bash call). The daemon passes it in the job;
-`agent-exec` logs which mode ran.
+Set in the root-owned guest hook. The mode is chosen at runtime with `|auth`,
+stored in the `settings` table, and read **per run** — so it takes effect on the
+next message rather than the next restart, and a run in flight keeps what it
+started with. `AGENT_POLICY` in `.env` is only the default for a database where
+`|auth` has never been used. The daemon passes the mode in the job; `agent-exec`
+logs which one ran.
 
 - The premise: the VM is the boundary, not the gate. `Read`/`Grep` are already
   unrestricted so the agent can read every private repo here regardless, and the

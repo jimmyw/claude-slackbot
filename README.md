@@ -196,8 +196,14 @@ already unrestricted, so the agent can read every repo here regardless — what
 remains worth a human is anything that changes the machine, escalates, or reaches
 back out of the workspace.
 
-`AGENT_POLICY=strict` in `daemon/.env` returns to asking for every `Bash` call.
-The policy is enforced in the guest hook; the env var only selects the mode, and
+Switch mode from Slack with `|auth strict` / `|auth permissive` — no restart. The
+choice is stored in the daemon's sqlite and read **per run**, so it applies from
+your next message; a run already in flight keeps the policy it started with,
+because the policy travels with the job. `AGENT_POLICY` in `daemon/.env` is only
+the default for a database that has never had `|auth` used on it.
+
+The policy is enforced by the root-owned hook in the guest, so the agent cannot
+alter it in either mode — `|auth` only selects which mode the hook runs in, and
 `agent-exec` logs which one each run used.
 
 The matching is deliberately crude — it inspects tokens, not shell semantics — so
@@ -331,7 +337,10 @@ itself, and it is never forwarded to Claude. Operator only.
 
 ```
 |help                 list the commands, with a one-line description each
-|status               VM state, whether the SSH bridge answers, grant count
+|status               VM state, SSH bridge, policy, grant count
+|auth                 show the current approval policy
+|auth strict          ask for every Bash call
+|auth permissive      back to the default
 |grants               standing grants with ids and use counts
 |grants --tool Bash   only that tool's grants
 |grants --unused      only grants that have never matched

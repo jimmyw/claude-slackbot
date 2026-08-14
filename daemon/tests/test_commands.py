@@ -161,6 +161,44 @@ async def main() -> int:
         check("a guest's ordinary request still reaches Claude",
               not await handled("please read the README", operator=False))
 
+        print("\n[9b] |auth changes the policy at runtime")
+        check("|auth shows the mode", await handled("|auth"))
+        body = client.posted[-1]["text"]
+        check("and names the current one",
+              "permissive" in body or "strict" in body, body[:60])
+
+        client.posted.clear()
+        check("|auth strict is accepted", await handled("|auth strict"))
+        check("the setting persisted",
+              d._store.get_setting("agent_policy", "permissive") == "strict",  # noqa: SLF001
+              d._store.get_setting("agent_policy", "permissive"))  # noqa: SLF001
+        check("and it says when it applies",
+              "next message" in client.posted[-1]["text"],
+              client.posted[-1]["text"][:80])
+
+        client.posted.clear()
+        check("switching to the same mode is a no-op",
+              await handled("|auth strict"))
+        check("and says so", "already" in client.posted[-1]["text"],
+              client.posted[-1]["text"][:60])
+
+        client.posted.clear()
+        check("|auth back to permissive", await handled("|auth permissive"))
+        check("setting updated",
+              d._store.get_setting("agent_policy", "strict") == "permissive")  # noqa: SLF001
+
+        client.posted.clear()
+        check("an invalid mode is consumed", await handled("|auth nonsense"))
+        check("and argparse explains the choices",
+              "invalid choice" in client.posted[-1]["text"],
+              client.posted[-1]["text"][:80])
+        check("and nothing went to Claude",
+              "Claude" in client.posted[-1]["text"])
+
+        check("the setting records who changed it",
+              (d._store.setting_meta("agent_policy") or ("", ""))[1] == AUTHORIZED,  # noqa: SLF001
+              d._store.setting_meta("agent_policy"))  # noqa: SLF001
+
         print("\n[10] |help lists every command with a description")
         client.posted.clear()
         await handled("|help")
