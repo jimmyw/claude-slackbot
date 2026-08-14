@@ -303,39 +303,71 @@ path *outside* the auto-allowed workspace, including `~/.gitconfig`, whose
 arbitrary outbound URL is an exfiltration channel). `covered_by()` re-checks this,
 so even a wildcard row inserted by hand is refused at match time.
 
-### Commands the daemon answers itself
+### Local commands
 
-These never reach Claude — the daemon intercepts them and replies directly, so
-they cost nothing and cannot be affected by the agent.
+A message whose text starts with `|` is a **local command**: the daemon answers it
+itself, and it is never forwarded to Claude. Operator only.
 
-| command | who | what |
-|---|---|---|
-| `help` `commands` `?` | anyone | this table, in Slack |
-| `status` | anyone | VM state, whether the SSH bridge answers, number of grants |
-| `grants` `grant` | anyone | standing grants with ids and use counts |
-| `revoke <id>` | operator | remove one grant |
-| `revoke all` | operator | remove every grant |
+```
+|help                 list the commands, with a one-line description each
+|status               VM state, whether the SSH bridge answers, grant count
+|grants               standing grants with ids and use counts
+|grants --tool Bash   only that tool's grants
+|grants --unused      only grants that have never matched
+|revoke 3             remove one grant
+|revoke all           remove every grant
+```
 
-**The whole message must be the command.** Matching is deliberately tight, because
-these are ordinary words:
+Each command has its own help:
+
+```
+|revoke -h
+  usage: |revoke [-h] target
+
+  Remove a standing grant so its tool calls ask for approval again.
+
+  positional arguments:
+    target      the grant id from |grants, or 'all' to remove every grant
+
+  Examples:  |revoke 3   |revoke all
+```
+
+**A line starting with `|` never reaches Claude, even when it doesn't parse.**
+`|grnats` gets an error listing the available commands; it is not passed on as a
+prompt. Every reply to a `|` message says so explicitly, so a typo can never
+quietly become a request. That also means the old keywords are free again:
 
 | message | goes where |
 |---|---|
-| `revoke 3` | the daemon — removes grant 3 |
-| `revoke all` | the daemon — removes everything |
-| `revoke the old deploy key from GitHub` | **Claude** — it's a request |
-| `status` | the daemon |
+| `|revoke 3` | the daemon |
+| `revoke the old deploy key from GitHub` | **Claude** |
+| `|status` | the daemon |
 | `status of the build?` | **Claude** |
-| `grants` | the daemon |
-| `grants in the repo are documented where?` | **Claude** |
 
-Leading `!` is accepted (`!status`), case is ignored, surrounding whitespace is
-trimmed. `revoke` with anything other than a single id or `all` is treated as
-prose and forwarded.
+#### Adding a command
 
-An earlier version matched `startswith("revoke")`, which meant
-`revoke the old deploy key from GitHub` was answered with a usage error and never
-reached Claude. `daemon/tests/test_commands.py` pins the boundary.
+One module per command in `daemon/slackagent/commands/`, discovered automatically —
+a new file registers itself and appears in `|help` with no list to update:
+
+```python
+NAME = "snapshot"
+ALIASES = ()
+SUMMARY = "take a ZFS snapshot of the VM disk"
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = SlackParser(prog="|snapshot", description="…")
+    parser.add_argument("--tag")
+    return parser
+
+async def run(ctx: Context, args: argparse.Namespace) -> None:
+    await ctx.say("…")
+```
+
+Parsing is real `argparse`, with two of its habits neutralised: `error()` and
+`exit()` normally print to stdout/stderr and call `sys.exit`, which in a daemon
+would kill the process and tell the operator nothing. `SlackParser` turns both into
+exceptions and suppresses argparse's own output — without that, `-h` emitted help
+twice, once into the log.
 
 Everything else you say — including a message that merely mentions these words —
 becomes a Claude Code turn in that thread.
