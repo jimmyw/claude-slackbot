@@ -82,6 +82,7 @@ class Bridge:
         session_id: str,
         resume: bool,
         run_token: str,
+        policy: str | None = None,
     ) -> AsyncIterator[dict]:
         """Start a run and yield each stream-json event as it arrives.
 
@@ -133,15 +134,18 @@ class Bridge:
                     "run_token": run_token,
                     "approval_port": port,
                     "cwd": cfg.vm_workdir,
-                    "policy": cfg.agent_policy,
+                    # Per run, not per process: |auth changes this and the next
+                    # run picks it up without a restart.
+                    "policy": policy or cfg.agent_policy,
                 }
             ).encode()
 
             log.info(
-                "starting run session=%s resume=%s tunnel_port=%s",
+                "starting run session=%s resume=%s tunnel_port=%s policy=%s",
                 session_id,
                 resume,
                 port,
+                policy or cfg.agent_policy,
             )
 
             process = await asyncio.create_subprocess_exec(

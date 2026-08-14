@@ -29,9 +29,11 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     # forced command ran — a healthy path, not a failure.
     reachable = "reachable" if probe.exit_code in {0, 64} else "unreachable"
     grants = ctx.store.list_grants()
+    policy = ctx.store.get_setting("agent_policy", ctx.config.agent_policy)
 
     await ctx.say(
         f"VM `{ctx.config.vm_domain}`: {state}{f' at {ip}' if ip else ''}\n"
         f"SSH bridge: {reachable}\n"
+        f"Policy: {policy} (`{COMMAND_PREFIX}auth` to change)\n"
         f"Standing grants: {len(grants)} (`{COMMAND_PREFIX}grants` to list)"
     )

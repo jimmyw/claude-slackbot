@@ -241,12 +241,19 @@ class Daemon:
         # retrying --session-id forever and permanently break the thread.
         session_created = False
 
+        # Read per run so |auth takes effect on the next message, not the next
+        # restart. The .env value is only the default.
+        policy = await asyncio.to_thread(
+            self._store.get_setting, "agent_policy", self._config.agent_policy
+        )
+
         try:
             async for event in self._bridge.run(
                 prompt=prompt,
                 session_id=session.session_id,
                 resume=not session.is_new,
                 run_token=run_token,
+                policy=policy,
             ):
                 if (
                     event.get("type") == "system"

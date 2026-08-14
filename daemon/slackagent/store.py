@@ -48,6 +48,16 @@ CREATE TABLE IF NOT EXISTS approvals (
 CREATE INDEX IF NOT EXISTS approvals_by_thread
     ON approvals (channel_id, thread_ts);
 
+-- Runtime settings the operator can change from Slack, so a policy switch does
+-- not need an .env edit and a restart. The .env value remains the default for a
+-- key that has never been set.
+CREATE TABLE IF NOT EXISTS settings (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    updated_by TEXT
+);
+
 -- Persistent "always allow" grants. These live on the HOST, in the daemon's
 -- database, so the agent can never grant itself anything: it asks, and the answer
 -- is computed out here.
@@ -221,6 +231,34 @@ class Store:
                 (int(time.time()), channel_id, thread_ts),
             )
             self._db.commit()
+
+    # -- settings -----------------------------------------------------------
+
+    def get_setting(self, key: str, default: str) -> str:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return row["value"] if row is not None else default
+
+    def set_setting(self, key: str, value: str, updated_by: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO settings (key, value, updated_at, updated_by) "
+                "VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                "value = excluded.value, updated_at = excluded.updated_at, "
+                "updated_by = excluded.updated_by",
+                (key, value, int(time.time()), updated_by),
+            )
+            self._db.commit()
+
+    def setting_meta(self, key: str) -> tuple[int, str] | None:
+        """(updated_at, updated_by) for a setting, or None if never set."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT updated_at, updated_by FROM settings WHERE key = ?", (key,)
+            ).fetchone()
+        return (int(row["updated_at"]), row["updated_by"] or "") if row else None
 
     # -- grants -------------------------------------------------------------
 
