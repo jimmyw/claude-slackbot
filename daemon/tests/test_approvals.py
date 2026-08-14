@@ -193,6 +193,16 @@ async def scenario_unauthorized_click(tmp: Path) -> None:
             "refusal is ephemeral only",
             respond.messages[0].get("response_type") == "ephemeral",
         )
+        # The bug this pins: a reply to a response_url REPLACES the original
+        # message unless told not to. Without replace_original=False an
+        # unauthorized click deleted the approver's buttons and left the request
+        # pending and unanswerable — a denial of service any channel member could
+        # trigger just by clicking.
+        check(
+            "refusal does NOT replace the original message",
+            respond.messages[0].get("replace_original") is False,
+            respond.messages[0],
+        )
         row = store.approval(approval_id)
         check("approval STILL pending after intruder click",
               row["state"] == "pending", row["state"])
@@ -318,6 +328,65 @@ async def scenario_run_ends_first(tmp: Path) -> None:
               verdict.get("approved") is False, verdict)
         check("reason explains the run ended",
               "run ended" in verdict.get("reason", ""), verdict)
+    finally:
+        await service.stop()
+        store.close()
+
+
+async def scenario_recovery(tmp: Path) -> None:
+    print("\n[10] a lost approval message can be recovered")
+    store = Store(tmp / "j.sqlite3")
+    slack = FakeSlack()
+    config = make_config(tmp / "j.sqlite3", 19109, timeout_s=30)
+    service = ApprovalService(config, store, slack)
+    await service.start()
+    try:
+        service.register_run("tok11", "C1", "111.9", "sess-11", requested_by=INTRUDER)
+        pending_task = asyncio.create_task(
+            post_approve(
+                19109,
+                {"run_token": "tok11", "tool_name": "Bash",
+                 "tool_input": {"command": "npm test"}, "tool_use_id": "t11"},
+            )
+        )
+        await asyncio.sleep(0.4)
+        first_ts = slack.posted[0]["ts"]
+
+        waiting = service.pending()
+        check("the waiting approval is listed", len(waiting) == 1, waiting)
+        check("with its tool", waiting[0]["tool_name"] == "Bash")
+        check("and its requester", waiting[0]["requested_by"] == INTRUDER)
+
+        # Simulate the message being destroyed, then put the buttons back.
+        posted_before = len(slack.posted)
+        ok = await service.repost(waiting[0]["id"])
+        check("repost succeeds for a live waiter", ok is True)
+        check("a new message was posted", len(slack.posted) == posted_before + 1)
+        new = slack.posted[-1]
+        check("the new message carries buttons",
+              any(b["type"] == "actions" for b in new["blocks"]))
+        check("it says it is a repost", "repost" in new["text"].lower(), new["text"])
+        check("and still names the requester",
+              INTRUDER in new["blocks"][0]["text"]["text"])
+        check("the stored message_ts moved to the new message",
+              store.approval(waiting[0]["id"])["message_ts"] == new["ts"],
+              (first_ts, new["ts"]))
+
+        # The reposted buttons work.
+        approval_id = [
+            b for b in new["blocks"] if b["type"] == "actions"
+        ][0]["elements"][0]["value"]
+        body, action = click(ACTION_APPROVE, approval_id, AUTHORIZED)
+        await service.handle_button(body, action, FakeRespond())
+        verdict = await asyncio.wait_for(pending_task, timeout=5)
+        check("the reposted button resolves the request",
+              verdict.get("approved") is True, verdict)
+
+        check("nothing is waiting afterwards", service.pending() == [])
+        check("reposting a resolved approval refuses",
+              await service.repost(approval_id) is False)
+        check("reposting an unknown id refuses",
+              await service.repost("nope") is False)
     finally:
         await service.stop()
         store.close()
@@ -541,6 +610,7 @@ async def main() -> int:
         await scenario_double_click(tmp)
         await scenario_run_ends_first(tmp)
         await scenario_guest_attribution(tmp)
+        await scenario_recovery(tmp)
         await scenario_grants(tmp)
         await scenario_session_mapping(tmp)
 

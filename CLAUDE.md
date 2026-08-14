@@ -153,7 +153,37 @@ One module per command in `slackagent/commands/`, discovered with
 - `test_commands.py` covers the registry, argparse validation, `-h`, the
   never-forwarded rule, operator-only, and eight prose cases that must reach Claude.
 
-## Who can do what## Who can do what
+## Slack interaction gotchas
+
+- **`respond()` replaces the original message by default.** A reply to a button's
+  `response_url` needs `replace_original: False` or it destroys the message it came
+  from. This actually happened: a guest clicked Approve, got the ephemeral refusal,
+  and the click deleted the operator's buttons — leaving the request pending with no
+  way to answer it, which any channel member could trigger at will. Every
+  `respond()` payload in `approvals.py` now sets it, and `test_approvals` asserts
+  it.
+- **Recovery exists because a message can always be lost** — deleted by hand, or
+  buried. `|pending` lists approvals with a live waiter and `--repost` posts fresh
+  buttons. Only live waiters are listed: a waiter exists solely while the hook holds
+  its HTTP request open, so after a timeout or a daemon restart there is nothing to
+  answer and new buttons would be a lie.
+
+## Who can do what## Slack interaction gotchas
+
+- **`respond()` replaces the original message by default.** A reply to a button's
+  `response_url` needs `replace_original: False` or it destroys the message it came
+  from. This actually happened: a guest clicked Approve, got the ephemeral refusal,
+  and the click deleted the operator's buttons — leaving the request pending with no
+  way to answer it, which any channel member could trigger at will. Every
+  `respond()` payload in `approvals.py` now sets it, and `test_approvals` asserts
+  it.
+- **Recovery exists because a message can always be lost** — deleted by hand, or
+  buried. `|pending` lists approvals with a live waiter and `--repost` posts fresh
+  buttons. Only live waiters are listed: a waiter exists solely while the hook holds
+  its HTTP request open, so after a timeout or a daemon restart there is nothing to
+  answer and new buttons would be a lie.
+
+## Who can do what
 
 - **Requesting and approving are separate roles.** Anyone in a channel the bot is
   invited to may talk to it; only `AUTHORIZED_USER_ID` may press Approve/Deny or
