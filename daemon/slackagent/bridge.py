@@ -133,6 +133,7 @@ class Bridge:
                     "run_token": run_token,
                     "approval_port": port,
                     "cwd": cfg.vm_workdir,
+                    "policy": cfg.agent_policy,
                 }
             ).encode()
 

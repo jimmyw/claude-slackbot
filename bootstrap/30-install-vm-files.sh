@@ -76,7 +76,7 @@ ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
 
     gate() { # tool_name json_input -> allow|deny
         printf "{\"tool_name\":\"%s\",\"tool_input\":%s}" "$1" "$2" \
-          | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py \
+          | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= python3 /etc/claude-agent/approve.py 2>/dev/null \
           | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
     }
 
@@ -86,7 +86,15 @@ ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
     echo -n "  Write in workspace:  "; gate Write "{\"file_path\":\"/home/agent/work/x.md\"}"
     echo -n "  Write outside:       "; gate Write "{\"file_path\":\"/etc/passwd\"}"
     echo -n "  Write via traversal: "; gate Write "{\"file_path\":\"/home/agent/work/../../etc/passwd\"}"
-    echo -n "  Bash in workspace:   "; gate Bash "{\"command\":\"ls /home/agent/work\"}"
+    echo -n "  Bash ordinary:       "; gate Bash "{\"command\":\"ls /home/agent/work\"}"
+    echo -n "  Bash sudo:           "; gate Bash "{\"command\":\"sudo id\"}"
+    echo -n "  Bash git push:       "; gate Bash "{\"command\":\"git push origin main\"}"
+    echo -n "  Bash overwrite gate: "; gate Bash "{\"command\":\"cp /tmp/x /usr/local/bin/agent-exec\"}"
+    echo -n "  Bash under strict:   "
+    printf "{\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}" \
+      | AGENT_APPROVAL_URL= AGENT_RUN_TOKEN= AGENT_POLICY=strict \
+        python3 /etc/claude-agent/approve.py 2>/dev/null \
+      | python3 -c "import json,sys; print(json.load(sys.stdin)[\"hookSpecificOutput\"][\"permissionDecision\"])"
 '
 
 echo

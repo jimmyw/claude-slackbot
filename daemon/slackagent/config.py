@@ -50,6 +50,7 @@ class Config:
     vm_workdir: str
     libvirt_uri: str
     forward_agent: bool
+    agent_policy: str
 
     # Approval gate
     approval_host: str
@@ -91,6 +92,14 @@ class Config:
             # guest is a real grant, not a default.
             forward_agent=os.environ.get("FORWARD_AGENT", "").strip().lower()
             in {"1", "true", "yes"},
+            # "permissive": Bash runs unless the hook's deny-list objects.
+            # "strict": every Bash call asks. The hook is the authority; this
+            # only tells it which mode to run in.
+            agent_policy=(
+                "strict"
+                if os.environ.get("AGENT_POLICY", "").strip().lower() == "strict"
+                else "permissive"
+            ),
             approval_host=os.environ.get("APPROVAL_HOST", "127.0.0.1"),
             approval_port=_int("APPROVAL_PORT", 9100),
             approval_timeout_s=_int("APPROVAL_TIMEOUT_S", 600),

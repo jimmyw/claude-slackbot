@@ -177,23 +177,44 @@ writes the mapping before the CLI starts, so the mapping is durable even if the
 first run dies. One `asyncio.Lock` per thread keeps two fast replies from
 resuming the same session concurrently.
 
-**Three tiers of approval.**
+**Permissive by default.** Most work runs without interrupting you:
 
-1. **Read-only tools run freely** — `Read`, `Grep`, `Glob`, `TodoWrite`,
-   `NotebookRead`.
-2. **Writes inside `/home/agent/work` run freely** — `Write`, `Edit`,
-   `MultiEdit`, `NotebookEdit`. Documentation work is dozens of files, and a
-   button press each made it unusable; the git diff is the better review anyway.
-3. **Everything else waits for you** — `Bash` above all, network fetches, and any
-   write whose path resolves outside the workspace.
+| | asks? |
+|---|---|
+| reading anything — `Read`, `Grep`, `Glob` | no |
+| writing inside `/home/agent/work` | no |
+| ordinary shell — build, test, git, `curl`, package installs in the workspace | no |
+| escalation or machine changes — `sudo`, `systemctl`, `apt`, `mount`, `dd`, `nft`, `crontab`, `modprobe`, `tailscale` | **yes** |
+| state outside the VM — `git push`, `git remote set-url`, `git config --global`, `npm publish` | **yes** |
+| writing outside the workspace — `/etc`, `/usr/local/bin`, anything under `/home/agent` that isn't `work/` | **yes** |
+| its own configuration — `~/.ssh`, `~/.gitconfig`, `~/.claude`, `~/.bashrc` | **yes** |
 
-`Bash` is deliberately never auto-allowed. A gate that blocks `Write` but allows
-`Bash` blocks nothing, since `bash -c 'echo > file'` does the same job — and in
-testing the model went looking for exactly that route when a `Write` was denied.
+The reasoning: the VM is the security boundary, not this gate. Egress is
+outbound-only with the LAN denied, no credential is at rest, and the hook is
+root-owned so the agent cannot edit the policy that constrains it. `Read` is
+already unrestricted, so the agent can read every repo here regardless — what
+remains worth a human is anything that changes the machine, escalates, or reaches
+back out of the workspace.
 
-Tier 2 uses `os.path.realpath`, so `work/../../etc/passwd` and a symlink planted
-at `work/escape -> /etc` both fall through to tier 3 rather than being treated as
-inside the workspace. `daemon/tests/test_hook_paths.py` covers those escapes with
+`AGENT_POLICY=strict` in `daemon/.env` returns to asking for every `Bash` call.
+The policy is enforced in the guest hook; the env var only selects the mode, and
+`agent-exec` logs which one each run used.
+
+The matching is deliberately crude — it inspects tokens, not shell semantics — so
+it errs towards asking. Two cases from `daemon/tests/test_bash_policy.py` show why
+the detail matters:
+
+- `sh -c "sudo id"` asks. The deny-list is matched against every word in the
+  command, not just the first, so hiding a command inside an interpreter does not
+  get past it.
+- `cp /tmp/x /usr/local/bin/agent-exec` asks. `/usr/local/bin` is harmless to
+  *read* and very much not to *write*, so the benign-path list is split by whether
+  the command mutates. Without that split, the agent could replace the forced
+  command that confines it — which is what the test caught.
+
+Workspace writes use `os.path.realpath`, so `work/../../etc/passwd` and a symlink
+planted at `work/escape -> /etc` both fall through to asking rather than being
+treated as inside the workspace. `daemon/tests/test_hook_paths.py` covers those escapes with
 real symlinks, and `30-install-vm-files.sh` re-checks them in the guest on every
 push.
 

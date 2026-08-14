@@ -171,6 +171,30 @@ One module per command in `slackagent/commands/`, discovered with
 - Guests can also spend API budget, and a long thread costs more per turn (see the
   cache note above). There is no per-user rate limit.
 
+## Bash policy (permissive)
+
+Set in the root-owned guest hook, selected by `AGENT_POLICY` (`permissive`
+default, `strict` to ask for every Bash call). The daemon passes it in the job;
+`agent-exec` logs which mode ran.
+
+- The premise: the VM is the boundary, not the gate. `Read`/`Grep` are already
+  unrestricted so the agent can read every private repo here regardless, and the
+  hook is root-owned so the policy cannot be edited by the identity it constrains.
+  What is left worth a human is escalation, machine changes, state outside the VM,
+  and writes outside the workspace.
+- **Deny-list words are matched against every token**, not the head, so
+  `sh -c "sudo id"` is caught. Matching whole commands by their first word would
+  have missed it.
+- **Benign paths are split into read-benign and write-benign.** With one list,
+  `cp /tmp/x /usr/local/bin/agent-exec` read as harmless — the agent could have
+  replaced the forced command confining it. `cp`, `install` and `tee` are mutators
+  for the same reason; a redirect (`>`) also counts as mutating.
+- Segment heads are taken across `&&`, `||`, `|` and `;`, so a mutator after a pipe
+  is still seen.
+- `test_bash_policy.py` is the record of where the line sits, in both directions:
+  22 everyday commands that must run, and the escalation, push, dotfile,
+  outside-workspace and gate-overwrite cases that must ask.
+
 ## Standing grants
 
 - Grants are `(tool_name, prefix)` in the daemon's sqlite **on the host**, so the
