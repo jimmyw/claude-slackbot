@@ -72,6 +72,149 @@ WORKSPACE = "/home/agent/work"
 REQUEST_TIMEOUT_S = 700
 
 
+# --- Bash policy ------------------------------------------------------------
+#
+# Permissive by default: Bash runs without asking unless the command trips one of
+# the rules below. The reasoning is that the VM is the security boundary, not this
+# gate — egress is outbound-only with the LAN denied, there is no credential at
+# rest, and this file is root-owned so the agent cannot edit it. Read/Grep are
+# already unrestricted, so the agent can read every repo here regardless; what
+# remains worth a human is anything that changes the machine, escalates, or
+# reaches back out of the workspace.
+#
+# Set AGENT_POLICY=strict to return to asking for every Bash call.
+
+# Commands that change the machine or escalate. Matched as whole words anywhere in
+# the command, so `sh -c "sudo x"` is caught as well as a bare `sudo x`.
+_ASK_COMMANDS = frozenset(
+    {
+        "sudo", "doas", "su", "visudo",
+        "useradd", "usermod", "userdel", "groupadd", "passwd", "chpasswd",
+        "systemctl", "service",
+        "reboot", "shutdown", "poweroff", "halt", "init", "telinit",
+        "mount", "umount", "mkfs", "fdisk", "parted", "mkswap", "swapon",
+        "dd", "shred",
+        "iptables", "nft", "ufw", "firewall-cmd",
+        "insmod", "rmmod", "modprobe",
+        "crontab", "at", "batch",
+        "tailscale", "tailscaled",
+        "apt", "apt-get", "dpkg", "yum", "dnf", "pacman", "snap",
+    }
+)
+
+# Two-word forms that matter more than their first word.
+_ASK_PHRASES = (
+    "git push",
+    "git remote add",
+    "git remote set-url",
+    "git config --global",
+    "npm publish",
+    "pip install",          # writes outside the workspace
+)
+
+# Commands that create, destroy, relocate or re-permission. Allowed inside the
+# workspace; asked about whenever they name a path outside it.
+#
+# `cp` and `install` belong here for a specific reason: without them
+# `cp /tmp/x /usr/local/bin/agent-exec` reads as harmless, and overwriting the
+# forced command is about the most useful thing an agent could do to escape.
+_MUTATORS = frozenset(
+    {
+        "rm", "rmdir", "unlink", "mv", "cp", "install", "tee", "touch", "mkdir",
+        "chmod", "chown", "chgrp", "truncate", "ln", "patch", "gzip", "tar",
+    }
+)
+
+_HOME = "/home/agent"
+
+# Scratch and sinks: harmless to name whatever the command does with them.
+_BENIGN_ANY = (
+    "/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/zero",
+    "/dev/urandom", "/tmp/", "/tmp",
+)
+
+# Harmless to READ or EXECUTE, but not to write. The split matters: with these on
+# one list, `cp /tmp/x /usr/local/bin/agent-exec` looked benign, which would have
+# let the agent replace the forced command that confines it.
+_BENIGN_READ_ONLY = (
+    "/usr/bin/", "/bin/", "/usr/local/bin/", "/usr/sbin/", "/sbin/",
+    "/usr/share/", "/usr/lib/", "/usr/include/", "/lib/", "/lib64/",
+    "/proc/", "/sys/", "/opt/",
+)
+
+
+def _paths_outside_workspace(command: str, mutating: bool) -> list[str]:
+    """Paths named in the command that leave the workspace.
+
+    Deliberately crude: it inspects tokens, not shell semantics. A false positive
+    costs one approval click; a false negative would let something through, so the
+    bias is towards asking.
+
+    When the command mutates, the read-only allowlist is not applied — writing to
+    /usr/local/bin is nothing like reading from it.
+    """
+    benign = _BENIGN_ANY if mutating else _BENIGN_ANY + _BENIGN_READ_ONLY
+    outside = []
+    for raw in command.split():
+        token = raw.strip("\"'()`,;|&<>")
+        if token.startswith("~"):
+            token = _HOME + token[1:]
+        if not token.startswith("/"):
+            continue
+        if token == WORKSPACE or token.startswith(WORKSPACE + "/"):
+            continue
+        if any(token == b or token.startswith(b) for b in benign):
+            continue
+        outside.append(token)
+    return outside
+
+
+def bash_reason_to_ask(command: str) -> str | None:
+    """Why this command needs a human, or None to let it run."""
+    lowered = command.lower()
+
+    for phrase in _ASK_PHRASES:
+        if phrase in lowered:
+            return f"`{phrase}` needs approval"
+
+    words = {w.strip("\"'()`,;|&<>") for w in lowered.split()}
+    hit = words & _ASK_COMMANDS
+    if hit:
+        return f"`{sorted(hit)[0]}` changes the machine or escalates"
+
+    # Touching the agent's own dotfiles is how a run would outlive itself: its
+    # gitconfig carries core.sshCommand for the forwarded ssh-agent, and its
+    # .claude directory holds the CLI token.
+    for marker in (".ssh", ".gitconfig", ".claude", ".config/claude-agent",
+                   "authorized_keys", "id_ed25519", "id_rsa", ".bashrc",
+                   ".profile"):
+        if marker in command:
+            return f"touches `{marker}`"
+
+    # Every word that starts a command in the pipeline, so a mutator hidden after
+    # a `&&` or a pipe is still seen.
+    heads = {
+        segment.split()[0]
+        for segment in command.replace("&&", ";").replace("||", ";")
+        .replace("|", ";").replace("\n", ";").split(";")
+        if segment.split()
+    }
+    # A redirection writes even when the command itself does not.
+    mutating = bool(heads & _MUTATORS) or ">" in command
+
+    outside = _paths_outside_workspace(command, mutating)
+    if outside:
+        if mutating:
+            return f"would write outside the workspace: `{outside[0]}`"
+        if any(
+            p.startswith(("/etc", "/root", "/boot", "/var", "/home/"))
+            for p in outside
+        ):
+            return f"reaches outside the workspace: `{outside[0]}`"
+
+    return None
+
+
 def decide(decision: str, reason: str) -> None:
     json.dump(
         {
@@ -136,6 +279,17 @@ def main() -> None:
 
     if tool_name in AUTO_ALLOW:
         decide("allow", f"{tool_name} is on the read-only allowlist")
+
+    # Permissive Bash: allowed unless a rule above says otherwise.
+    policy = os.environ.get("AGENT_POLICY", "permissive").strip().lower()
+    if tool_name == "Bash" and policy != "strict":
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        if isinstance(command, str) and command.strip():
+            reason = bash_reason_to_ask(command)
+            if reason is None:
+                decide("allow", "permissive policy: nothing in this command needs a human")
+            # else fall through and ask, carrying the reason in the log below.
+            sys.stderr.write(f"approve: asking about Bash because {reason}\n")
 
     target = workspace_write_target(tool_name, tool_input)
     if target is not None:

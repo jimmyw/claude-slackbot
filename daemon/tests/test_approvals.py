@@ -82,6 +82,7 @@ def make_config(db_path: Path, port: int, timeout_s: int) -> Config:
         vm_workdir="/home/agent/work",
         libvirt_uri="qemu:///system",
         forward_agent=False,
+        agent_policy="permissive",
         approval_host="127.0.0.1",
         approval_port=port,
         approval_timeout_s=timeout_s,

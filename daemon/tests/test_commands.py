@@ -55,6 +55,7 @@ def make_daemon(tmp: Path) -> Daemon:
         vm_host="10.0.0.1", vm_user="agent", vm_ssh_key=key,
         vm_domain="agent-vm", vm_workdir="/home/agent/work",
         libvirt_uri="qemu:///system", forward_agent=False,
+        agent_policy="permissive",
         approval_host="127.0.0.1", approval_port=9100, approval_timeout_s=600,
         tunnel_port_low=9101, tunnel_port_high=9199,
         db_path=tmp / "s.sqlite3", update_interval_s=0.0,

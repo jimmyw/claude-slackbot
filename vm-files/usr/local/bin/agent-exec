@@ -96,6 +96,7 @@ RESUME="$(get resume)"
 RUN_TOKEN="$(get run_token)"
 APPROVAL_PORT="$(get approval_port)"
 CWD="$(get cwd)"
+POLICY="$(get policy)"
 [[ -n "$CWD" ]] || CWD=/home/agent/work
 
 for required in PROMPT SESSION_ID RUN_TOKEN APPROVAL_PORT; do
@@ -106,6 +107,9 @@ done
 # learns where to ask for permission — it never holds a Slack token.
 export AGENT_APPROVAL_URL="http://127.0.0.1:${APPROVAL_PORT}/approve"
 export AGENT_RUN_TOKEN="$RUN_TOKEN"
+# permissive (default) or strict. The hook reads this to decide whether Bash is
+# allowed unless deny-listed, or asked about every time.
+export AGENT_POLICY="${POLICY:-permissive}"
 
 cd "$CWD"
 
@@ -127,7 +131,7 @@ else
     ARGS+=(--session-id "$SESSION_ID")
 fi
 
-log "starting session=$SESSION_ID resume=$RESUME cwd=$CWD"
+log "starting session=$SESSION_ID resume=$RESUME cwd=$CWD policy=$AGENT_POLICY"
 
 # stdin is already consumed by the job read; give the CLI /dev/null so it does
 # not sit waiting for piped input.

@@ -31,23 +31,33 @@ directory. Everything you produce should go inside it.
 
 ## Tool approvals
 
-- **Read-only tools** (Read, Grep, Glob) run without asking.
-- **Writing files inside `/home/agent/work`** (Write, Edit, MultiEdit) runs
-  without asking. Your work there is reviewed as a git diff afterwards, which is
-  a better check than a button press per file.
-- **Everything else is gated**: Bash of any kind, network fetches, and any write
-  aimed outside the workspace. A human gets an Approve/Deny prompt in Slack and
-  the call blocks until they answer. No answer within the window is a denial.
+Most of what you need runs without asking:
 
-Three things follow from that:
+- **Reading anything** — Read, Grep, Glob.
+- **Writing inside `/home/agent/work`** — your work there is reviewed as a git
+  diff, which is a better check than a button press per file.
+- **Ordinary shell work** — building, testing, git, package managers scoped to the
+  workspace, fetching over the network. Get on with it.
 
-- **Prefer Write/Edit over shell redirects.** `Write` to a workspace path is
-  free; `bash -c 'cat > file'` needs a human. Same result, one interruption fewer.
-- **Batch your gated calls.** If you need several commands, work out the whole
-  list first and ask once, rather than discovering them one at a time.
+A human is asked only when a command would:
+
+- **escalate or change the machine** — `sudo`, `systemctl`, `apt`, `mount`, `dd`,
+  kernel modules, firewall, cron;
+- **change state outside this VM** — `git push`, `git remote set-url`,
+  `npm publish`;
+- **write outside `/home/agent/work`** — including `/etc`, `/usr/local/bin` and
+  anything under `/home/agent` that is not `work/`;
+- **touch your own configuration** — `~/.ssh`, `~/.gitconfig`, `~/.claude`,
+  `~/.bashrc`. Your gitconfig is what lets git reach GitHub; changing it breaks
+  your own access.
+
+Two things follow:
+
+- **Don't ask permission in prose.** If a command needs approval you will be told
+  by the tool result. Until then, act.
 - **When a tool is denied, stop and report it.** Do not look for another route to
-  the same effect — a denied Bash command must not become a sequence of writes
-  that accomplishes it anyway. The denial is a decision, not an obstacle.
+  the same effect — a denied command must not become a sequence of writes that
+  accomplishes it anyway. The denial is a decision, not an obstacle.
 
 ## Git
 
