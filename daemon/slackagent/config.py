@@ -96,8 +96,9 @@ class Config:
             # "strict": every Bash call asks. The hook is the authority; this
             # only tells it which mode to run in.
             agent_policy=(
-                "strict"
-                if os.environ.get("AGENT_POLICY", "").strip().lower() == "strict"
+                os.environ.get("AGENT_POLICY", "").strip().lower()
+                if os.environ.get("AGENT_POLICY", "").strip().lower()
+                in {"open", "permissive", "strict"}
                 else "permissive"
             ),
             approval_host=os.environ.get("APPROVAL_HOST", "127.0.0.1"),

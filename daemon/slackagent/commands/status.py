@@ -34,6 +34,8 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     await ctx.say(
         f"VM `{ctx.config.vm_domain}`: {state}{f' at {ip}' if ip else ''}\n"
         f"SSH bridge: {reachable}\n"
-        f"Policy: {policy} (`{COMMAND_PREFIX}auth` to change)\n"
+        f"Policy: {policy}"
+        + (" — :warning: approvals disabled" if policy == "open" else "")
+        + f" (`{COMMAND_PREFIX}auth` to change)\n"
         f"Standing grants: {len(grants)} (`{COMMAND_PREFIX}grants` to list)"
     )
