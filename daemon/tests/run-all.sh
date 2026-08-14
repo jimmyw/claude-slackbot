@@ -10,7 +10,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 PY=.venv/bin/python
 [[ -x "$PY" ]] || { echo "no venv — run: python3 -m venv .venv && .venv/bin/pip install -e ." >&2; exit 1; }
 
-SUITES=(tests.test_approvals tests.test_render tests.test_vmctl tests.test_bridge_args tests.test_hook_paths tests.test_cloud_init)
+SUITES=(tests.test_approvals tests.test_render tests.test_vmctl tests.test_bridge_args tests.test_hook_paths tests.test_cloud_init tests.test_commands)
 if [[ "${1:-}" != "--offline" ]]; then
     SUITES+=(tests.test_gate_e2e)
 else
