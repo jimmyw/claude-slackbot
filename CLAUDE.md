@@ -108,6 +108,23 @@ sessions.
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
 
+## Daemon commands (not forwarded to Claude)
+
+`help` / `commands` / `?`, `status`, `grants` / `grant`, `revoke <id>`,
+`revoke all`. Handled in `Daemon._handle_command`, which returns a bool: False
+means "send it to Claude", and that is the default for anything ambiguous.
+
+- **The match must stay tight.** These are ordinary English words. An earlier
+  version used `startswith("revoke")` and swallowed
+  "revoke the old deploy key from GitHub", answering with a usage error. `revoke`
+  now requires exactly one argument that is a digit string or `all`/`*`; anything
+  else is prose and gets forwarded.
+- Leading `!` is stripped, case is folded, whitespace trimmed.
+- `revoke` is operator-only, but the message is still *consumed* when a guest
+  sends it — they get a refusal rather than having it forwarded to Claude as a
+  request to revoke something.
+- `test_commands.py` pins both directions, including the prose cases.
+
 ## Who can do what
 
 - **Requesting and approving are separate roles.** Anyone in a channel the bot is

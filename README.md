@@ -303,8 +303,42 @@ path *outside* the auto-allowed workspace, including `~/.gitconfig`, whose
 arbitrary outbound URL is an exfiltration channel). `covered_by()` re-checks this,
 so even a wildcard row inserted by hand is refused at match time.
 
-**`status` in a thread** reports the VM state, the SSH bridge, and how many
-standing grants exist.
+### Commands the daemon answers itself
+
+These never reach Claude — the daemon intercepts them and replies directly, so
+they cost nothing and cannot be affected by the agent.
+
+| command | who | what |
+|---|---|---|
+| `help` `commands` `?` | anyone | this table, in Slack |
+| `status` | anyone | VM state, whether the SSH bridge answers, number of grants |
+| `grants` `grant` | anyone | standing grants with ids and use counts |
+| `revoke <id>` | operator | remove one grant |
+| `revoke all` | operator | remove every grant |
+
+**The whole message must be the command.** Matching is deliberately tight, because
+these are ordinary words:
+
+| message | goes where |
+|---|---|
+| `revoke 3` | the daemon — removes grant 3 |
+| `revoke all` | the daemon — removes everything |
+| `revoke the old deploy key from GitHub` | **Claude** — it's a request |
+| `status` | the daemon |
+| `status of the build?` | **Claude** |
+| `grants` | the daemon |
+| `grants in the repo are documented where?` | **Claude** |
+
+Leading `!` is accepted (`!status`), case is ignored, surrounding whitespace is
+trimmed. `revoke` with anything other than a single id or `all` is treated as
+prose and forwarded.
+
+An earlier version matched `startswith("revoke")`, which meant
+`revoke the old deploy key from GitHub` was answered with a usage error and never
+reached Claude. `daemon/tests/test_commands.py` pins the boundary.
+
+Everything else you say — including a message that merely mentions these words —
+becomes a Claude Code turn in that thread.
 
 ## Tests
 

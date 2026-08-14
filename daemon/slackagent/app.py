@@ -187,26 +187,10 @@ class Daemon:
             log.warning("refused message from %s (not on ALLOWED_USERS)", user)
             return
 
-        command = text.lower().lstrip("!").strip()
-        if command in {"status"}:
-            await self._post_status(channel, thread_ts)
-            return
-        if command in {"grants", "grant", "allowed"}:
-            await self._post_grants(channel, thread_ts)
-            return
-        if command.startswith("revoke"):
-            # Changing what runs without asking is an operator action, not
-            # something a guest in the channel should be able to do.
-            if not is_operator:
-                await self._app.client.chat_postMessage(
-                    channel=channel, thread_ts=thread_ts,
-                    text=(
-                        f":no_entry: Only <@{self._config.authorized_user}> can "
-                        "change grants."
-                    ),
-                )
-                return
-            await self._revoke(channel, thread_ts, command, user or "")
+        # Daemon commands are handled here and never reach Claude. The match must
+        # be tight: these are ordinary words, and a message that merely begins with
+        # one is far more likely to be a request than a command.
+        if await self._handle_command(channel, thread_ts, text, user or "", is_operator):
             return
 
         lock = self._thread_locks[(channel, thread_ts)]
@@ -277,6 +261,71 @@ class Daemon:
         finally:
             self._approvals.unregister_run(run_token)
             await renderer.flush(force=True)
+
+    async def _handle_command(
+        self, channel: str, thread_ts: str, text: str, user: str, is_operator: bool
+    ) -> bool:
+        """Handle a daemon command. Returns True if it was one.
+
+        Returning False sends the message to Claude, which is the right default:
+        `status`, `grants` and `revoke` are all words someone might reasonably use
+        in a sentence. Only an exact match, or `revoke` with an id or `all`, counts.
+        An earlier version used startswith("revoke"), which swallowed "revoke the
+        old deploy key from GitHub" and answered with a usage error.
+        """
+        command = text.strip().lstrip("!").strip().lower()
+
+        if command in {"help", "commands", "?"}:
+            await self._post_help(channel, thread_ts)
+            return True
+
+        if command == "status":
+            await self._post_status(channel, thread_ts)
+            return True
+
+        if command in {"grants", "grant"}:
+            await self._post_grants(channel, thread_ts)
+            return True
+
+        parts = command.split()
+        if parts and parts[0] == "revoke":
+            arg = parts[1] if len(parts) == 2 else ""
+            if arg in {"all", "*"} or arg.isdigit():
+                if not is_operator:
+                    await self._app.client.chat_postMessage(
+                        channel=channel, thread_ts=thread_ts,
+                        text=(
+                            f":no_entry: Only <@{self._config.authorized_user}> "
+                            "can change grants."
+                        ),
+                    )
+                    return True
+                await self._revoke(channel, thread_ts, command, user)
+                return True
+            # Anything else beginning with "revoke" is prose for Claude.
+            return False
+
+        return False
+
+    async def _post_help(self, channel: str, thread_ts: str) -> None:
+        await self._app.client.chat_postMessage(
+            channel=channel, thread_ts=thread_ts,
+            text=(
+                "*Commands I handle myself* (everything else goes to Claude):\n"
+                "  `help` — this message\n"
+                "  `status` — VM state, SSH bridge, number of standing grants\n"
+                "  `grants` — list standing grants with use counts\n"
+                "  `revoke <id>` — remove one grant (operator only)\n"
+                "  `revoke all` — remove every grant (operator only)\n"
+                "\n"
+                "These must be the *whole* message. `revoke the old deploy key` is "
+                "a request and goes to Claude; `revoke 3` is a command.\n"
+                "\n"
+                f"Only <@{self._config.authorized_user}> can approve tool calls or "
+                "change grants. Anyone here can ask me to do things; anything not "
+                "pre-approved waits for them."
+            ),
+        )
 
     async def _post_grants(self, channel: str, thread_ts: str) -> None:
         grants = await asyncio.to_thread(self._store.list_grants)
