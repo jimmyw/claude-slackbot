@@ -207,6 +207,74 @@ def main() -> int:
         finally:
             store.close()
 
+    print("\n[12] migrating a database written before match_type existed")
+    with tempfile.TemporaryDirectory() as raw:
+        import sqlite3
+        old = Path(raw) / "old.sqlite3"
+        db = sqlite3.connect(old)
+        db.executescript(
+            """
+            CREATE TABLE grants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, tool_name TEXT NOT NULL,
+                pattern TEXT NOT NULL, created_at INTEGER NOT NULL,
+                created_by TEXT NOT NULL, use_count INTEGER NOT NULL DEFAULT 0,
+                last_used_at INTEGER, UNIQUE (tool_name, pattern));
+            CREATE TABLE approvals (
+                id TEXT PRIMARY KEY, channel_id TEXT, thread_ts TEXT,
+                message_ts TEXT, session_id TEXT, tool_name TEXT NOT NULL,
+                tool_input_json TEXT, tool_use_id TEXT, state TEXT NOT NULL,
+                requested_at INTEGER NOT NULL, resolved_at INTEGER,
+                resolved_by TEXT);
+            INSERT INTO grants (tool_name, pattern, created_at, created_by, use_count)
+                VALUES ('Bash', 'git status', 1, 'U', 7);
+            INSERT INTO grants (tool_name, pattern, created_at, created_by, use_count)
+                VALUES ('ToolSearch', '*', 1, 'U', 3);
+            INSERT INTO approvals (id, tool_name, state, requested_at)
+                VALUES ('a1', 'Bash', 'approved', 1);
+            """
+        )
+        db.commit()
+        db.close()
+
+        store = Store(old)
+        try:
+            rows = store.list_grants()
+            check("the existing grants survive", len(rows) == 2, rows)
+            wildcard = next(r for r in rows if r.pattern == "*")
+            # '*' was the wildcard marker before match_type existed. Migrating it
+            # to 'prefix' would leave it matching the literal string '*' and the
+            # operator's grant would quietly stop working.
+            check("a legacy '*' grant becomes match_type=any",
+                  wildcard.match_type == MATCH_ANY, wildcard.match_type)
+            check("and still covers its tool",
+                  covered(rows, "ToolSearch", {"query": "anything"}))
+            rows = [r for r in rows if r.pattern != "*"]
+            check("its use_count survives", rows[0].use_count == 7, rows[0].use_count)
+            check("match_type defaults to prefix",
+                  rows[0].match_type == MATCH_PREFIX, rows[0].match_type)
+            check("it still matches what it used to",
+                  covered(rows, "Bash", bash("git status --short")))
+
+            # The UNIQUE constraint gained match_type. On an un-rebuilt table this
+            # raises IntegrityError, which is why the migration recreates it.
+            store.add_grant("Bash", "git status", "U", MATCH_EXACT)
+            check("the same pattern can now hold two match types",
+                  len(store.list_grants()) == 3, store.list_grants())
+
+            store.open_approval("a2", "C", "1.1", "s", "Bash", "{}", "t", "U_BOB")
+            check("requested_by is usable after migration",
+                  store.approval("a2")["requested_by"] == "U_BOB")
+            check("old approval rows are untouched",
+                  store.approval("a1")["state"] == "approved")
+
+            # Idempotent: opening it again must not try to migrate twice.
+            store.close()
+            again = Store(old)
+            check("reopening is a no-op", len(again.list_grants()) == 3)
+            again.close()
+        finally:
+            pass
+
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
