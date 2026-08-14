@@ -218,6 +218,72 @@ class ApprovalService:
             {"approved": verdict.approved, "reason": verdict.reason}
         )
 
+    # -- recovery -----------------------------------------------------------
+
+    def pending(self) -> list[dict]:
+        """Approvals still blocking a run, i.e. with a live waiter.
+
+        Only these are worth re-posting: a waiter exists solely while the hook is
+        holding its HTTP request open. After a timeout or a daemon restart the
+        request is already answered or gone, and new buttons would do nothing.
+        """
+        out = []
+        for approval_id, future in self._waiters.items():
+            if future.done():
+                continue
+            row = self._store.approval(approval_id)
+            if row is None or row["state"] != "pending":
+                continue
+            out.append(
+                {
+                    "id": approval_id,
+                    "tool_name": row["tool_name"],
+                    "requested_by": row["requested_by"] or "",
+                    "channel_id": row["channel_id"],
+                    "thread_ts": row["thread_ts"],
+                    "tool_input_json": row["tool_input_json"],
+                }
+            )
+        return out
+
+    async def repost(self, approval_id: str) -> bool:
+        """Post fresh buttons for a still-pending approval.
+
+        Needed because a reply to a response_url can destroy the original message;
+        without this the only way back was to wait for the timeout and ask the
+        agent to try again.
+        """
+        if approval_id not in self._waiters or self._waiters[approval_id].done():
+            return False
+        row = self._store.approval(approval_id)
+        if row is None or row["state"] != "pending":
+            return False
+
+        try:
+            tool_input = json.loads(row["tool_input_json"] or "null")
+        except (json.JSONDecodeError, ValueError):
+            tool_input = None
+
+        requester = row["requested_by"] or ""
+        posted = await self._slack.chat_postMessage(
+            channel=row["channel_id"],
+            thread_ts=row["thread_ts"],
+            text=f"Approval needed (reposted): {row['tool_name']}",
+            blocks=_approval_blocks(
+                approval_id, row["tool_name"], tool_input,
+                self._suggestions.get(approval_id),
+                requester=(
+                    requester
+                    if requester and requester != self._config.authorized_user
+                    else None
+                ),
+            ),
+        )
+        await asyncio.to_thread(
+            self._store.attach_message_ts, approval_id, posted["ts"]
+        )
+        return True
+
     # -- button handling ----------------------------------------------------
 
     async def handle_button(self, body: dict, action: dict, respond: Any) -> None:
@@ -239,6 +305,12 @@ class ApprovalService:
             await respond(
                 {
                     "response_type": "ephemeral",
+                    # replace_original=False is load-bearing. A reply to a
+                    # response_url REPLACES the original message by default, so
+                    # without it an unauthorized click DELETED the buttons and left
+                    # the request pending and unanswerable — a denial of service any
+                    # channel member could trigger by clicking.
+                    "replace_original": False,
                     "text": (
                         f":no_entry: Only <@{self._config.authorized_user}> can "
                         "approve or deny tool calls. Your request is still "
@@ -251,7 +323,11 @@ class ApprovalService:
         row = await asyncio.to_thread(self._store.approval, approval_id)
         if row is None:
             await respond(
-                {"response_type": "ephemeral", "text": "That approval is unknown."}
+                {
+                    "response_type": "ephemeral",
+                    "replace_original": False,
+                    "text": "That approval is unknown.",
+                }
             )
             return
 
@@ -265,6 +341,7 @@ class ApprovalService:
             await respond(
                 {
                     "response_type": "ephemeral",
+                    "replace_original": False,
                     "text": f"Already resolved ({row['state']}).",
                 }
             )

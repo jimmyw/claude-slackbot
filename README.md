@@ -273,7 +273,14 @@ deliberately invited. Guests are told to use a channel.
 
 **Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
 buttons; a click from anyone else gets an ephemeral refusal naming the operator and
-leaves the request pending. `revoke` is operator-only too — a guest changing what
+leaves the request pending.
+
+> A reply to a Slack button's `response_url` **replaces the original message
+> unless you pass `replace_original: False`**. Without it, an unauthorized click
+> deleted the approver's buttons and left the request pending and unanswerable —
+> a denial of service any channel member could trigger by clicking. Fixed, and
+> `|pending --repost` recovers an approval whose message is lost for any other
+> reason. `revoke` is operator-only too — a guest changing what
 runs unattended would defeat the point. Silence for `APPROVAL_TIMEOUT_S`
 (default 600) is a denial.
 
@@ -341,6 +348,8 @@ itself, and it is never forwarded to Claude. Operator only.
 |auth                 show the current approval policy
 |auth strict          ask for every Bash call
 |auth permissive      back to the default
+|pending              approvals still waiting for you
+|pending --repost     post their buttons again
 |grants               standing grants with ids and use counts
 |grants --tool Bash   only that tool's grants
 |grants --unused      only grants that have never matched

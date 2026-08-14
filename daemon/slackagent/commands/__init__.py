@@ -75,6 +75,7 @@ class Context:
     store: Any
     vm: Any
     bridge: Any
+    approvals: Any
     say: Callable[[str], Awaitable[None]]
 
 
