@@ -76,45 +76,99 @@ async def main() -> int:
                 "C1", "1.1", text, AUTHORIZED if operator else GUEST, operator
             )
 
-        print("\n[1] exact commands are handled here, not sent to Claude")
-        for text in ["help", "commands", "?", "status", "grants", "grant",
-                     "!status", "  status  ", "STATUS", "Grants"]:
+        print("\n[1] the registry discovers command modules")
+        from slackagent.commands import commands as registered, registry
+        names = [c.name for c in registered()]
+        for expected in ["help", "status", "grants", "revoke"]:
+            check(f"{expected!r} is registered", expected in names, names)
+        check("aliases resolve", {"grant", "commands", "?"} <= set(registry()),
+              sorted(registry()))
+        check("every command has a summary",
+              all(c.summary for c in registered()))
+        check("every command has a usage line",
+              all(c.usage.startswith("|") for c in registered()),
+              [c.usage for c in registered()])
+
+        print("\n[2] | commands are handled here, never sent to Claude")
+        for text in ["|help", "|commands", "|?", "|", "|status", "|grants",
+                     "|grant", "  |status  ", "|STATUS", "|Grants"]:
             check(f"{text!r} is a command", await handled(text), text)
 
-        print("\n[2] revoke only when it carries an id or 'all'")
-        for text in ["revoke 3", "revoke all", "revoke *", "!revoke 12"]:
+        print("\n[3] |revoke argument validation via argparse")
+        for text in ["|revoke 3", "|revoke all", "|revoke *"]:
             check(f"{text!r} is a command", await handled(text), text)
+        for bad, why in [("|revoke", "missing argument"),
+                         ("|revoke xyz", "not an id"),
+                         ("|revoke 3 4", "too many")]:
+            client.posted.clear()
+            check(f"{bad!r} is consumed ({why})", await handled(bad), bad)
+            body = client.posted[-1]["text"]
+            check(f"{bad!r} explains itself", "usage" in body.lower(), body[:70])
+            check(f"{bad!r} says nothing went to Claude", "Claude" in body)
 
-        print("\n[3] prose that merely starts with a command word reaches Claude")
+        print("\n[4] -h gives per-command help, not an error")
+        for text in ["|grants -h", "|revoke -h", "|status --help"]:
+            client.posted.clear()
+            check(f"{text!r} is consumed", await handled(text), text)
+            body = client.posted[-1]["text"]
+            check(f"{text!r} shows usage", "usage:" in body.lower(), body[:70])
+            check(f"{text!r} is not flagged as an error",
+                  ":warning:" not in body, body[:70])
+
+        print("\n[5] |grants has its own options")
+        client.posted.clear()
+        check("|grants --tool Bash works", await handled("|grants --tool Bash"))
+        check("|grants --unused works", await handled("|grants --unused"))
+        client.posted.clear()
+        check("an unknown option is consumed", await handled("|grants --nope"))
+        check("and explains itself",
+              "usage" in client.posted[-1]["text"].lower(),
+              client.posted[-1]["text"][:70])
+
+        print("\n[6] an unparsed | line is consumed, NOT forwarded")
+        for text in ["|grnats", "|dance", "||"]:
+            client.posted.clear()
+            check(f"{text!r} is consumed", await handled(text), text)
+            body = client.posted[-1]["text"]
+            check(f"{text!r} says nothing went to Claude", "Claude" in body, body[:70])
+            check(f"{text!r} lists what is available",
+                  "Available" in body or "help" in body, body[:70])
+
+        print("\n[7] a | line anywhere means the message is not forwarded")
+        for text in ["please run\n|status", "do a thing\n  |revoke all\nthanks"]:
+            client.posted.clear()
+            check(f"{text!r} is consumed", await handled(text), text)
+            check("and says nothing was sent to Claude",
+                  "Claude" in client.posted[-1]["text"], client.posted[-1]["text"][:70])
+
+        print("\n[8] prose without a | reaches Claude, including the old keywords")
         for text in [
             "revoke the old deploy key from GitHub",
-            "revoke my github token please",
             "status of the build?",
             "grants in the repo are documented where?",
-            "can you check status and report",
-            "revoke 3 keys from the server",          # two args, not an id
-            "revoke",                                  # bare, no target
+            "revoke 3", "status", "grants", "help",
+            "what does the | character do in bash?",
         ]:
             check(f"{text!r} goes to Claude", not await handled(text), text)
 
-        print("\n[4] guests cannot revoke, but the message is still consumed")
-        before = len(client.posted)
-        check("guest 'revoke all' is handled (refused, not forwarded)",
-              await handled("revoke all", operator=False))
-        check("and the refusal names the operator",
-              AUTHORIZED in client.posted[-1]["text"], client.posted[-1]["text"])
-        check("a guest may still read grants", await handled("grants", operator=False))
-        check("something was posted for each", len(client.posted) > before)
+        print("\n[9] commands are operator-only")
+        for text in ["|help", "|status", "|grants", "|revoke all"]:
+            client.posted.clear()
+            check(f"guest {text!r} is refused", await handled(text, operator=False), text)
+            check("and the refusal names the operator",
+                  AUTHORIZED in client.posted[-1]["text"], client.posted[-1]["text"][:70])
+        check("a guest's ordinary request still reaches Claude",
+              not await handled("please read the README", operator=False))
 
-        print("\n[5] help lists the whole API")
+        print("\n[10] |help lists every command with a description")
         client.posted.clear()
-        await handled("help")
+        await handled("|help")
         body = client.posted[-1]["text"]
-        for token in ["status", "grants", "revoke <id>", "revoke all", "help"]:
-            check(f"help documents {token!r}", token in body)
-        check("help says these must be the whole message",
-              "whole" in body.lower(), body[:60])
-        check("help names who can approve", AUTHORIZED in body)
+        for command in registered():
+            check(f"help lists |{command.name}", f"|{command.name}" in body)
+            check(f"help shows {command.name}'s summary",
+                  command.summary in body, command.summary)
+        check("help points at per-command help", "-h" in body, body[-120:])
 
         d._store.close()  # noqa: SLF001
 

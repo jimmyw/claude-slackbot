@@ -108,24 +108,30 @@ sessions.
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
 
-## Daemon commands (not forwarded to Claude)
+## Local commands (`|`-prefixed, never forwarded)
 
-`help` / `commands` / `?`, `status`, `grants` / `grant`, `revoke <id>`,
-`revoke all`. Handled in `Daemon._handle_command`, which returns a bool: False
-means "send it to Claude", and that is the default for anything ambiguous.
+One module per command in `slackagent/commands/`, discovered with
+`pkgutil.iter_modules`. A new file registers itself and appears in `|help`.
 
-- **The match must stay tight.** These are ordinary English words. An earlier
-  version used `startswith("revoke")` and swallowed
-  "revoke the old deploy key from GitHub", answering with a usage error. `revoke`
-  now requires exactly one argument that is a digit string or `all`/`*`; anything
-  else is prose and gets forwarded.
-- Leading `!` is stripped, case is folded, whitespace trimmed.
-- `revoke` is operator-only, but the message is still *consumed* when a guest
-  sends it — they get a refusal rather than having it forwarded to Claude as a
-  request to revoke something.
-- `test_commands.py` pins both directions, including the prose cases.
+- **The `|` marker replaced bare-keyword matching.** The first version matched
+  `status`/`grants`/`revoke` as plain text and used `startswith("revoke")`, so
+  "revoke the old deploy key from GitHub" was answered with a usage error and never
+  reached Claude. The marker makes intent explicit in both directions.
+- **Any line starting with `|` means the message is not forwarded**, even when it
+  fails to parse: a stray `|whatever` is a mistyped command, and passing it on
+  would leak an operator instruction into what the agent sees. Every reply to a `|`
+  message states that nothing was sent.
+- **All local commands are operator-only**, including the read-only ones.
+- `SlackParser` overrides `error()`, `exit()` **and `_print_message()`**. The first
+  two would call `sys.exit` and kill the daemon; the third is the one that is easy
+  to miss — argparse routes help to stdout through it, so without the override `-h`
+  emitted the help twice and polluted the log.
+- `-h` arrives as `CommandHelp` (a `CommandError` subclass) so it renders as usage
+  rather than as a failure.
+- `test_commands.py` covers the registry, argparse validation, `-h`, the
+  never-forwarded rule, operator-only, and eight prose cases that must reach Claude.
 
-## Who can do what
+## Who can do what## Who can do what
 
 - **Requesting and approving are separate roles.** Anyone in a channel the bot is
   invited to may talk to it; only `AUTHORIZED_USER_ID` may press Approve/Deny or

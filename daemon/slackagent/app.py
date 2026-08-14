@@ -18,6 +18,7 @@ from collections import defaultdict
 from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
 from slack_bolt.app.async_app import AsyncApp
 
+from . import commands
 from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalService
 from .bridge import Bridge
 from .config import Config, ConfigError
@@ -28,6 +29,8 @@ from .vmctl import VmControl
 log = logging.getLogger("slackagent")
 
 _MENTION = re.compile(r"<@[A-Z0-9]+>")
+
+COMMAND_PREFIX = commands.COMMAND_PREFIX
 
 
 class Daemon:
@@ -265,132 +268,68 @@ class Daemon:
     async def _handle_command(
         self, channel: str, thread_ts: str, text: str, user: str, is_operator: bool
     ) -> bool:
-        """Handle a daemon command. Returns True if it was one.
+        """Handle a local command. Returns True if the message was one.
 
-        Returning False sends the message to Claude, which is the right default:
-        `status`, `grants` and `revoke` are all words someone might reasonably use
-        in a sentence. Only an exact match, or `revoke` with an id or `all`, counts.
-        An earlier version used startswith("revoke"), which swallowed "revoke the
-        old deploy key from GitHub" and answered with a usage error.
+        Three rules, in order:
+
+          1. If ANY line starts with `|`, the message is never forwarded to Claude
+             — not even when it fails to parse. A stray `|whatever` is a mistyped
+             command, and sending it on would leak an operator instruction into the
+             conversation the agent sees.
+          2. Only the operator may run them.
+          3. The command must be the whole message, on one line.
+
+        Parsing itself lives in slackagent.commands: one module per command,
+        discovered rather than listed, using argparse so `|grants -h` works.
         """
-        command = text.strip().lstrip("!").strip().lower()
-
-        if command in {"help", "commands", "?"}:
-            await self._post_help(channel, thread_ts)
-            return True
-
-        if command == "status":
-            await self._post_status(channel, thread_ts)
-            return True
-
-        if command in {"grants", "grant"}:
-            await self._post_grants(channel, thread_ts)
-            return True
-
-        parts = command.split()
-        if parts and parts[0] == "revoke":
-            arg = parts[1] if len(parts) == 2 else ""
-            if arg in {"all", "*"} or arg.isdigit():
-                if not is_operator:
-                    await self._app.client.chat_postMessage(
-                        channel=channel, thread_ts=thread_ts,
-                        text=(
-                            f":no_entry: Only <@{self._config.authorized_user}> "
-                            "can change grants."
-                        ),
-                    )
-                    return True
-                await self._revoke(channel, thread_ts, command, user)
-                return True
-            # Anything else beginning with "revoke" is prose for Claude.
+        lines = text.strip().splitlines()
+        if not any(line.strip().startswith(COMMAND_PREFIX) for line in lines):
             return False
 
-        return False
+        # Past this point the message is consumed no matter what.
+        async def say(message: str) -> None:
+            await self._say(channel, thread_ts, message)
 
-    async def _post_help(self, channel: str, thread_ts: str) -> None:
-        await self._app.client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts,
-            text=(
-                "*Commands I handle myself* (everything else goes to Claude):\n"
-                "  `help` — this message\n"
-                "  `status` — VM state, SSH bridge, number of standing grants\n"
-                "  `grants` — list standing grants with use counts\n"
-                "  `revoke <id>` — remove one grant (operator only)\n"
-                "  `revoke all` — remove every grant (operator only)\n"
-                "\n"
-                "These must be the *whole* message. `revoke the old deploy key` is "
-                "a request and goes to Claude; `revoke 3` is a command.\n"
-                "\n"
-                f"Only <@{self._config.authorized_user}> can approve tool calls or "
-                "change grants. Anyone here can ask me to do things; anything not "
-                "pre-approved waits for them."
-            ),
-        )
-
-    async def _post_grants(self, channel: str, thread_ts: str) -> None:
-        grants = await asyncio.to_thread(self._store.list_grants)
-        if not grants:
-            await self._app.client.chat_postMessage(
-                channel=channel, thread_ts=thread_ts,
-                text=("No standing grants. Every gated tool call asks.\n"
-                      "Press *Always allow* on an approval to add one."),
+        if not is_operator:
+            await say(
+                f":no_entry: `{COMMAND_PREFIX}` commands are only for "
+                f"<@{self._config.authorized_user}>. Ask me something instead and "
+                "I will do it, subject to their approval."
             )
-            return
-        lines = [
-            f"*{len(grants)} standing grant(s)* — these skip the button entirely:"
-        ]
-        for g in grants:
-            used = f"{g.use_count} use{'s' if g.use_count != 1 else ''}"
-            if g.match_type == "any":
-                scope = "any use"
-            elif g.match_type == "exact":
-                scope = f"exactly `{g.pattern}`"
-            else:
-                scope = f"`{g.pattern}` and below"
-            lines.append(f"  `{g.id}`  {g.tool_name}: {scope}  ({used})")
-        lines.append("`revoke <id>` to remove one, `revoke all` to clear them.")
-        await self._app.client.chat_postMessage(
-            channel=channel, thread_ts=thread_ts, text="\n".join(lines)
-        )
+            log.info("refused local command from guest %s", user)
+            return True
 
-    async def _revoke(
-        self, channel: str, thread_ts: str, command: str, user: str
-    ) -> None:
-        arg = command[len("revoke"):].strip()
-        if arg in {"all", "*"}:
-            n = await asyncio.to_thread(self._store.revoke_all)
-            log.info("%s revoked all %s grants", user, n)
-            text = f"Revoked {n} grant(s). Everything asks again."
-        elif arg.isdigit():
-            ok = await asyncio.to_thread(self._store.revoke_grant, int(arg))
-            log.info("%s revoked grant %s: %s", user, arg, ok)
-            text = (
-                f"Revoked grant `{arg}`." if ok
-                else f"No grant `{arg}`. Use `grants` to list them."
+        stripped = text.strip()
+        if len(lines) > 1 or not stripped.startswith(COMMAND_PREFIX):
+            await say(
+                f"A `{COMMAND_PREFIX}` command has to be the whole message, on its "
+                f"own line. Nothing was sent to Claude. Try `{COMMAND_PREFIX}help`."
             )
-        else:
-            text = "Usage: `revoke <id>` or `revoke all`. `grants` lists them."
+            return True
+
+        ctx = commands.Context(
+            channel=channel, thread_ts=thread_ts, user=user,
+            is_operator=is_operator, config=self._config, store=self._store,
+            vm=self._vm, bridge=self._bridge, say=say,
+        )
+        try:
+            await commands.dispatch(ctx, stripped)
+        except commands.CommandHelp as help_text:
+            # -h and --help arrive here: usage, not a failure.
+            await say(f"```\n{help_text}\n```")
+        except commands.CommandError as exc:
+            await say(f":warning: {exc}\nNothing was sent to Claude.")
+        except Exception:
+            log.exception("local command failed: %r", stripped)
+            await say(
+                ":warning: That command failed. Nothing was sent to Claude; "
+                "see the daemon log."
+            )
+        return True
+
+    async def _say(self, channel: str, thread_ts: str, text: str) -> None:
         await self._app.client.chat_postMessage(
             channel=channel, thread_ts=thread_ts, text=text
-        )
-
-    async def _post_status(self, channel: str, thread_ts: str) -> None:
-        state = await self._vm.state()
-        ip = await self._vm.ip_address()
-        probe = await self._bridge.probe()
-        # agent-exec exits 64 on an empty job, which means SSH authenticated and
-        # the forced command ran — a healthy path.
-        ssh_ok = "reachable" if probe.exit_code in {0, 64} else "unreachable"
-
-        await self._app.client.chat_postMessage(
-            channel=channel,
-            thread_ts=thread_ts,
-            text=(
-                f"VM `{self._config.vm_domain}`: {state}"
-                f"{f' at {ip}' if ip else ''}\nSSH bridge: {ssh_ok}"
-                f"\nStanding grants: {len(await asyncio.to_thread(self._store.list_grants))}"
-                f" (`grants` to list)"
-            ),
         )
 
     # -- lifecycle ----------------------------------------------------------
