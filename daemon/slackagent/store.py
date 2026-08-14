@@ -93,7 +93,64 @@ class Store:
         self._db.row_factory = sqlite3.Row
         with self._lock:
             self._db.executescript(SCHEMA)
+            self._migrate()
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Bring an existing database up to the current schema.
+
+        `CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists,
+        so every column added after a release needs an explicit migration.
+        Without this the schema in SCHEMA is only true of *fresh* databases, and
+        the first query touching a new column fails at runtime — which is exactly
+        what happened: `match_type` broke `|status`, and `requested_by` would have
+        crashed the next approval request and with it the gate.
+        """
+        def columns(table: str) -> set[str]:
+            return {
+                row["name"]
+                for row in self._db.execute(f"PRAGMA table_info({table})")
+            }
+
+        # approvals.requested_by — a plain add, no constraint change.
+        if "requested_by" not in columns("approvals"):
+            self._db.execute("ALTER TABLE approvals ADD COLUMN requested_by TEXT")
+
+        # grants.match_type — needs a rebuild, not an ALTER: the UNIQUE constraint
+        # gained match_type, and sqlite cannot alter a constraint in place. With the
+        # old two-column UNIQUE still in force, adding an `exact` grant beside an
+        # existing `prefix` one for the same pattern would raise IntegrityError.
+        if "match_type" not in columns("grants"):
+            self._db.executescript(
+                """
+                CREATE TABLE grants_migrated (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    tool_name    TEXT    NOT NULL,
+                    pattern      TEXT    NOT NULL,
+                    match_type   TEXT    NOT NULL DEFAULT 'prefix'
+                        CHECK (match_type IN ('prefix', 'exact', 'any')),
+                    created_at   INTEGER NOT NULL,
+                    created_by   TEXT    NOT NULL,
+                    use_count    INTEGER NOT NULL DEFAULT 0,
+                    last_used_at INTEGER,
+                    UNIQUE (tool_name, pattern, match_type)
+                );
+                INSERT INTO grants_migrated
+                    (id, tool_name, pattern, match_type, created_at, created_by,
+                     use_count, last_used_at)
+                SELECT id, tool_name, pattern,
+                       -- Before match_type existed, '*' was itself the wildcard
+                       -- marker for tools with nothing to scope by. Labelling
+                       -- those 'prefix' would leave them matching the literal
+                       -- string '*', i.e. nothing: the operator's existing grants
+                       -- would silently stop working and start asking again.
+                       CASE WHEN pattern = '*' THEN 'any' ELSE 'prefix' END,
+                       created_at, created_by, use_count, last_used_at
+                FROM grants;
+                DROP TABLE grants;
+                ALTER TABLE grants_migrated RENAME TO grants;
+                """
+            )
 
     def close(self) -> None:
         with self._lock:

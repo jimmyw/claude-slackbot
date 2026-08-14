@@ -108,6 +108,28 @@ sessions.
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
 
+## Database migrations
+
+- **`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists**, so
+  `SCHEMA` is only true of *fresh* databases. Every column added after a release
+  needs an explicit migration in `Store._migrate`, or the first query touching it
+  fails at runtime — which happened: `grants.match_type` broke `|status`, and
+  `approvals.requested_by` would have crashed the next approval and with it the
+  gate. Neither showed up in tests, because tests always start from an empty file.
+- Adding a column is `ALTER TABLE ADD COLUMN`. **Changing a constraint is not**:
+  sqlite cannot alter one in place, so `grants` is rebuilt (create, copy, drop,
+  rename) because its UNIQUE gained `match_type`. Without the rebuild, adding an
+  `exact` grant beside an existing `prefix` one for the same pattern raises
+  IntegrityError.
+- **Migrating data can be silently wrong even when the schema is right.** The first
+  attempt labelled every existing grant `prefix`, including six whose pattern was
+  `*` — the wildcard marker from before `match_type` existed. They became grants
+  matching the literal string `*`, i.e. nothing, so the operator's grants would
+  have quietly started asking again. The migration now maps `pattern = '*'` to
+  `match_type = 'any'`.
+- `test_grants.py` builds a database with the old schema and migrates it, which is
+  the only way this class of bug is visible before deployment.
+
 ## Local commands (`|`-prefixed, never forwarded)
 
 One module per command in `slackagent/commands/`, discovered with
