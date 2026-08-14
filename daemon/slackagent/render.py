@@ -16,6 +16,8 @@ import logging
 import time
 from typing import Any
 
+from .mrkdwn import to_mrkdwn
+
 log = logging.getLogger(__name__)
 
 # Slack rejects a section block whose text exceeds 3000 characters.
@@ -124,12 +126,16 @@ class SlackRenderer:
     # -- rendering ----------------------------------------------------------
 
     def _plain_text(self) -> str:
-        text = "".join(self._text_parts).strip() or "_working…_"
+        # The fallback field is what notifications and unfurl previews show, so it
+        # is converted too rather than left as raw Markdown.
+        text = to_mrkdwn("".join(self._text_parts).strip()) or "_working…_"
         return text[:2900]
 
     def _blocks(self) -> list[dict]:
         blocks: list[dict] = []
-        body = "".join(self._text_parts).strip()
+        # Claude writes GitHub Markdown; Slack renders mrkdwn. Without this the
+        # message arrives showing literal ##, ** and [text](url).
+        body = to_mrkdwn("".join(self._text_parts).strip())
 
         if self._activity:
             recent = self._activity[-6:]
@@ -180,7 +186,13 @@ class SlackRenderer:
 
 
 def _chunk(text: str, size: int) -> list[str]:
-    """Split on paragraph boundaries where possible, hard-split when not."""
+    """Split on paragraph boundaries where possible, hard-split when not.
+
+    Fence-aware: a split inside a ``` block would leave one chunk unterminated and
+    the next starting with a stray fence, so Slack would render the first as an
+    endless code block and the second as prose containing ```. Any chunk with an odd
+    number of fences is closed, and the following one reopened.
+    """
     if len(text) <= size:
         return [text]
 
@@ -197,7 +209,20 @@ def _chunk(text: str, size: int) -> list[str]:
         remaining = remaining[split:].lstrip("\n")
     if remaining:
         chunks.append(remaining)
-    return chunks
+
+    balanced: list[str] = []
+    carry_open = False
+    for chunk in chunks:
+        if carry_open:
+            chunk = "```\n" + chunk
+        # Reserve room for the fences added on either side.
+        if chunk.count("```") % 2:
+            chunk = chunk + "\n```"
+            carry_open = True
+        else:
+            carry_open = False
+        balanced.append(chunk)
+    return balanced
 
 
 def _describe_tool(name: str | None, tool_input: Any) -> str:

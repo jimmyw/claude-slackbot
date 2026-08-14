@@ -163,6 +163,52 @@ async def test_long_output() -> None:
     )
     check("fallback text within limit", len(final["text"]) <= 3000, len(final["text"]))
 
+    print("\n[3b] markdown becomes mrkdwn, and code survives")
+    slack = FakeSlack()
+    renderer = SlackRenderer(slack, "C1", "1.1", update_interval_s=0.0)
+    await renderer.start()
+    await renderer.handle({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text":
+            "## Done\n\nRead **three** files.\n\n- one\n- two\n\n"
+            "```c\nint x = 1;  /* **kept** */\n```\n\n"
+            "See [docs](https://x.dev)."}]},
+    })
+    await renderer.flush(force=True)
+    sent = slack.updates[-1]
+    body = "\n".join(
+        b["text"]["text"] for b in sent["blocks"] if b.get("type") == "section"
+    )
+    check("heading became bold", "*Done*" in body, body[:60])
+    check("no literal ## reaches Slack", "## " not in body, body[:60])
+    check("bold converted", "*three*" in body and "**three**" not in body, body[:80])
+    check("bullets became •", "• one" in body, body[:120])
+    check("link converted", "<https://x.dev|docs>" in body, body[-60:])
+    check("code block content untouched", "/* **kept** */" in body, body)
+    check("language tag dropped", "```c" not in body, body)
+    check("the fallback text is converted too",
+          "*Done*" in sent["text"] and "## " not in sent["text"], sent["text"][:60])
+
+    print("\n[3c] a long message never splits a code fence")
+    slack = FakeSlack()
+    renderer = SlackRenderer(slack, "C1", "1.1", update_interval_s=0.0)
+    await renderer.start()
+    big_code = "\n".join(f"line {i:04d} of output" for i in range(300))
+    await renderer.handle({
+        "type": "assistant",
+        "message": {"content": [{"type": "text", "text":
+            "Here it is:\n\n```\n" + big_code + "\n```\n\nDone."}]},
+    })
+    await renderer.flush(force=True)
+    sections = [
+        b["text"]["text"] for b in slack.updates[-1]["blocks"]
+        if b.get("type") == "section"
+    ]
+    check("it did split into several blocks", len(sections) > 1, len(sections))
+    for i, chunk in enumerate(sections):
+        check(f"block {i} has balanced fences", chunk.count("```") % 2 == 0,
+              chunk.count("```"))
+
     print("\n[4] helpers")
     check("chunk never exceeds the size", all(len(c) <= 100 for c in _chunk("x" * 950, 100)))
     check("chunk preserves everything",
