@@ -153,6 +153,26 @@ One module per command in `slackagent/commands/`, discovered with
 - `test_commands.py` covers the registry, argparse validation, `-h`, the
   never-forwarded rule, operator-only, and eight prose cases that must reach Claude.
 
+## Slack rendering
+
+- **Slack does not speak Markdown.** Claude writes GitHub-flavoured Markdown and
+  Slack renders mrkdwn, which is a different language: `**bold**` shows literal
+  asterisks, `## Heading` shows a literal `##`, `[text](url)` shows brackets, and a
+  ```` ```lang ```` tag appears as the first line inside the block. `slackagent/mrkdwn.py`
+  converts; `render.py` applies it to both the blocks and the fallback `text`.
+- **Italic must be converted before bold.** The natural order is wrong: bold
+  becomes `*x*`, which the italic rule then rewrites to `_x_`, so every bold word
+  arrived italic. The italic pattern's lookarounds already refuse to match inside
+  `**x**`, so running it first is safe. The test caught this immediately.
+- **Nothing inside a fence or an inline code span may be rewritten.** Both routinely
+  contain `*`, `_` and `[]`, and altering them misrepresents a command or a diff.
+- **Tables are wrapped in a code fence**, because mrkdwn has no table syntax and
+  alignment is the only reason a table was drawn.
+- **Chunking must not split a fence.** A long message split mid-block leaves one
+  chunk unterminated and the next starting with a stray ```` ``` ````, so Slack
+  renders an endless code block followed by prose full of backticks. `_chunk`
+  balances fences across chunk boundaries.
+
 ## Slack interaction gotchas
 
 - **`respond()` replaces the original message by default.** A reply to a button's
@@ -168,7 +188,27 @@ One module per command in `slackagent/commands/`, discovered with
   its HTTP request open, so after a timeout or a daemon restart there is nothing to
   answer and new buttons would be a lie.
 
-## Who can do what## Slack interaction gotchas
+## Who can do what## Slack rendering
+
+- **Slack does not speak Markdown.** Claude writes GitHub-flavoured Markdown and
+  Slack renders mrkdwn, which is a different language: `**bold**` shows literal
+  asterisks, `## Heading` shows a literal `##`, `[text](url)` shows brackets, and a
+  ```` ```lang ```` tag appears as the first line inside the block. `slackagent/mrkdwn.py`
+  converts; `render.py` applies it to both the blocks and the fallback `text`.
+- **Italic must be converted before bold.** The natural order is wrong: bold
+  becomes `*x*`, which the italic rule then rewrites to `_x_`, so every bold word
+  arrived italic. The italic pattern's lookarounds already refuse to match inside
+  `**x**`, so running it first is safe. The test caught this immediately.
+- **Nothing inside a fence or an inline code span may be rewritten.** Both routinely
+  contain `*`, `_` and `[]`, and altering them misrepresents a command or a diff.
+- **Tables are wrapped in a code fence**, because mrkdwn has no table syntax and
+  alignment is the only reason a table was drawn.
+- **Chunking must not split a fence.** A long message split mid-block leaves one
+  chunk unterminated and the next starting with a stray ```` ``` ````, so Slack
+  renders an endless code block followed by prose full of backticks. `_chunk`
+  balances fences across chunk boundaries.
+
+## Slack interaction gotchas
 
 - **`respond()` replaces the original message by default.** A reply to a button's
   `response_url` needs `replace_original: False` or it destroys the message it came
