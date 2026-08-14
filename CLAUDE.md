@@ -203,6 +203,15 @@ One module per command in `slackagent/commands/`, discovered with
 
 ## Bash policy (permissive)
 
+Three modes: `open` (nothing asks), `permissive` (default), `strict` (every Bash
+call asks). An unrecognised value falls back to `permissive`.
+
+`open` is worth understanding precisely: it disables the gate, but the OS still
+holds. The agent has no sudo and the hook, settings.json and agent-exec are
+root-owned, so it cannot escalate or disable its own gate even then — the layering
+is doing the work, not the policy. What `open` adds is `git push` with the forwarded
+agent and self-modification of its dotfiles.
+
 Set in the root-owned guest hook. The mode is chosen at runtime with `|auth`,
 stored in the `settings` table, and read **per run** — so it takes effect on the
 next message rather than the next restart, and a run in flight keeps what it

@@ -188,6 +188,22 @@ async def main() -> int:
               d._store.get_setting("agent_policy", "strict") == "permissive")  # noqa: SLF001
 
         client.posted.clear()
+        check("|auth open is accepted", await handled("|auth open"))
+        check("open persisted",
+              d._store.get_setting("agent_policy", "x") == "open")  # noqa: SLF001
+        check("and it warns about what open means",
+              ":warning:" in client.posted[-1]["text"],
+              client.posted[-1]["text"][-120:])
+        await handled("|auth permissive")
+
+        client.posted.clear()
+        check("|auth lists every mode", await handled("|auth"))
+        body = client.posted[-1]["text"]
+        for mode in ("open", "permissive", "strict"):
+            check(f"the listing includes {mode!r}", f"`{mode}`" in body, body[:80])
+        check("and marks the current one", "current" in body, body[:200])
+
+        client.posted.clear()
         check("an invalid mode is consumed", await handled("|auth nonsense"))
         check("and argparse explains the choices",
               "invalid choice" in client.posted[-1]["text"],

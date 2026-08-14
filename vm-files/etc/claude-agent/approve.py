@@ -82,7 +82,10 @@ REQUEST_TIMEOUT_S = 700
 # remains worth a human is anything that changes the machine, escalates, or
 # reaches back out of the workspace.
 #
-# Set AGENT_POLICY=strict to return to asking for every Bash call.
+# AGENT_POLICY selects the mode:
+#   open        nothing is ever asked; the gate is effectively off
+#   permissive  the default, described above
+#   strict      every Bash call is asked about
 
 # Commands that change the machine or escalate. Matched as whole words anywhere in
 # the command, so `sh -c "sudo x"` is caught as well as a bare `sudo x`.
@@ -277,11 +280,22 @@ def main() -> None:
     tool_name = payload.get("tool_name") or "<unknown>"
     tool_input = payload.get("tool_input")
 
+    policy = os.environ.get("AGENT_POLICY", "permissive").strip().lower()
+
+    # `open` disables the gate entirely. What still protects the machine is not
+    # this file but the operating system: the agent has no sudo, and this hook,
+    # settings.json and agent-exec are root-owned, so even in this mode the agent
+    # cannot escalate or disable its own gate. What `open` does newly permit is
+    # `git push` with the forwarded ssh-agent, and edits to the agent's own
+    # dotfiles — which is why it is a deliberate choice and not a default.
+    if policy == "open":
+        sys.stderr.write(f"approve: open policy, allowing {tool_name}\n")
+        decide("allow", "open policy: approvals are disabled")
+
     if tool_name in AUTO_ALLOW:
         decide("allow", f"{tool_name} is on the read-only allowlist")
 
     # Permissive Bash: allowed unless a rule above says otherwise.
-    policy = os.environ.get("AGENT_POLICY", "permissive").strip().lower()
     if tool_name == "Bash" and policy != "strict":
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
         if isinstance(command, str) and command.strip():

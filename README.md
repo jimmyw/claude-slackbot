@@ -196,7 +196,23 @@ already unrestricted, so the agent can read every repo here regardless — what
 remains worth a human is anything that changes the machine, escalates, or reaches
 back out of the workspace.
 
-Switch mode from Slack with `|auth strict` / `|auth permissive` — no restart. The
+Three modes, most open first — `|auth` lists them:
+
+| mode | behaviour |
+|---|---|
+| `open` | nothing is ever asked; the gate is off |
+| `permissive` | the table above: ordinary work runs, escalation and reach outside the workspace ask |
+| `strict` | every `Bash` call asks |
+
+**`open` is not as total as it sounds, and that is deliberate.** What protects the
+VM is the operating system, not this switch: the agent has no sudo, and the hook,
+its `settings.json` and `agent-exec` are all root-owned, so even with the gate off
+it cannot escalate or disable its own gate. What `open` newly permits is `git push`
+using the forwarded ssh-agent — with a personal key that means anything you can
+write — and edits to its own `~/.gitconfig`, `~/.claude` and `~/.ssh`, which
+persist between runs. `|auth open` says so at the moment you choose it.
+
+Switch mode from Slack with `|auth <mode>` — no restart. The
 choice is stored in the daemon's sqlite and read **per run**, so it applies from
 your next message; a run already in flight keeps the policy it started with,
 because the policy travels with the job. `AGENT_POLICY` in `daemon/.env` is only
@@ -345,9 +361,10 @@ itself, and it is never forwarded to Claude. Operator only.
 ```
 |help                 list the commands, with a one-line description each
 |status               VM state, SSH bridge, policy, grant count
-|auth                 show the current approval policy
+|auth                 list all modes, marking the current one
+|auth open            nothing asks at all
+|auth permissive      the default
 |auth strict          ask for every Bash call
-|auth permissive      back to the default
 |pending              approvals still waiting for you
 |pending --repost     post their buttons again
 |grants               standing grants with ids and use counts

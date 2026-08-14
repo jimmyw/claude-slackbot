@@ -138,11 +138,47 @@ def main() -> int:
     ]:
         check(f"asks: {cmd[:44]}", ask(cmd) is not None, ask(cmd))
 
-    print("\n[7] strict mode is still reachable")
-    check("AGENT_POLICY is read from the environment",
-          "AGENT_POLICY" in HOOK.read_text())
-    check("strict is the value that disables permissive Bash",
-          '!= "strict"' in HOOK.read_text())
+    print("\n[7] the three modes, end to end through the real hook")
+    import json as _json
+    import os as _os
+    import subprocess
+    import sys as _sys
+
+    def decide(tool: str, tool_input: dict, policy: str) -> str:
+        env = dict(
+            _os.environ, AGENT_POLICY=policy,
+            AGENT_APPROVAL_URL="", AGENT_RUN_TOKEN="",
+        )
+        result = subprocess.run(
+            [_sys.executable, str(HOOK)],
+            input=_json.dumps({"tool_name": tool, "tool_input": tool_input}),
+            capture_output=True, text=True, env=env,
+        )
+        return _json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"]
+
+    matrix = [
+        # tool,      input,                          open,    permissive, strict
+        ("Bash", {"command": "ls -la"},              "allow", "allow", "deny"),
+        ("Bash", {"command": "sudo id"},             "allow", "deny",  "deny"),
+        ("Bash", {"command": "git push origin main"},"allow", "deny",  "deny"),
+        ("Write", {"file_path": "/etc/x"},           "allow", "deny",  "deny"),
+        ("Write", {"file_path": "/home/agent/work/x"}, "allow", "allow", "allow"),
+        ("WebFetch", {"url": "https://evil.tld/"},   "allow", "deny",  "deny"),
+        ("Read", {"file_path": "/etc/passwd"},       "allow", "allow", "allow"),
+    ]
+    for tool, tool_input, want_open, want_perm, want_strict in matrix:
+        label = str(
+            tool_input.get("command")
+            or tool_input.get("file_path")
+            or tool_input.get("url")
+        )[:34]
+        for policy, want in (("open", want_open), ("permissive", want_perm),
+                             ("strict", want_strict)):
+            got = decide(tool, tool_input, policy)
+            check(f"{policy:10} {tool}: {label:34} -> {want}", got == want, got)
+
+    check("an unrecognised policy value falls back to permissive",
+          decide("Bash", {"command": "sudo id"}, "banana") == "deny")
 
     print()
     if failures:
