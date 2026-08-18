@@ -127,8 +127,18 @@ sessions.
   matching the literal string `*`, i.e. nothing, so the operator's grants would
   have quietly started asking again. The migration now maps `pattern = '*'` to
   `match_type = 'any'`.
-- `test_grants.py` builds a database with the old schema and migrates it, which is
-  the only way this class of bug is visible before deployment.
+- `test_grants.py` and `test_thread_modes.py` build databases with the old schema and
+  migrate them, which is the only way this class of bug is visible before deployment.
+- **A table cannot be renamed here.** `executescript(SCHEMA)` runs *before*
+  `_migrate`, so the new table already exists (empty) by then and
+  `ALTER TABLE paused_threads RENAME TO thread_modes` fails with "there is already
+  another table or index with this name". Copy and drop instead.
+- **`PRAGMA table_info` on a table that does not exist returns an empty set**, not an
+  error, so `columns()` cannot tell "absent" from "has no columns". Anything
+  table-level has to ask `sqlite_master`; hence `tables()`.
+- A copy-and-drop uses `INSERT OR IGNORE`, so a database interrupted between the copy
+  and the drop is replayable rather than failing on the primary key for ever.
+  `test_thread_modes.py` builds exactly that half-migrated shape.
 
 ## Local commands (`|`-prefixed, never forwarded)
 
@@ -152,16 +162,12 @@ One module per command in `slackagent/commands/`, discovered with
   rather than as a failure.
 - `test_commands.py` covers the registry, argparse validation, `-h`, the
   never-forwarded rule, operator-only, and the prose cases that must reach Claude.
-- **`|pause` / `|resume` mute one thread**, stored in a `paused_threads` table.
-  Checked in `_on_message` *after* command dispatch, deliberately: a paused thread
-  has to keep accepting `|resume` or there is no way out of it. Everything else is
-  dropped, mentions included — a pause that argues back is not a pause — and
-  nothing is posted, so the log line is the only trace. `|status` reports it,
-  because silence-by-design and silence-by-breakage look identical in Slack.
+- **`|silent`, `|pause` and `|resume` set a per-thread mode** — see "Three thread
+  modes" above.
 - A **new table** needs no migration, unlike a new column: `SCHEMA` runs on every
   open and `CREATE TABLE IF NOT EXISTS` does create one that is absent. That is why
-  the pause lives in its own table rather than as a column on `threads` — and it
-  also lets a thread be paused before the bot has ever run in it.
+  the mode lives in its own table rather than as a column on `threads` — and it
+  also lets a thread be muted before the bot has ever run in it.
 
 ## Slack rendering
 
@@ -183,67 +189,125 @@ One module per command in `slackagent/commands/`, discovered with
   renders an endless code block followed by prose full of backticks. `_chunk`
   balances fences across chunk boundaries.
 
-## Silence
+## Three thread modes
 
-- **An unaddressed message may get no reply at all.** Anyone can post in a thread
-  the bot owns, and most of those posts are people talking to each other. The
-  daemon wraps such a message in `_UNADDRESSED_NOTE` (`app.py`) and the guest
-  `CLAUDE.md` tells the agent to answer with exactly `[[no-reply]]` when the
-  message was not for it. `render.SILENT_MARKER` then suppresses the whole
-  message.
+Per thread, in `thread_modes`: `active` (default), `silent` (`|silent`), `paused`
+(`|pause`). `|resume` returns to active.
+
+| mode | untagged reply | tagged / DM | cost of an ignored message |
+|---|---|---|---|
+| active | forwarded; the agent judges and may answer `[[no-reply]]` | answered | one turn |
+| silent | dropped in the daemon, counted | answered, with catch-up | nothing |
+| paused | dropped, counted | dropped, counted | nothing |
+
+- **`active` is never stored.** It is the absence of a row, so `|resume` is a DELETE
+  and a fresh thread costs no write, and the CHECK makes it unstorable — "a row
+  exists" can then only mean muted, whatever a future upsert does.
+- **`set_thread_mode` returns the previous mode.** All three commands must say what
+  changed, and `|silent` in a paused thread *loosens* the mute — `|silent` sounds
+  stricter than `|pause` and is looser, so announcing it is the difference between a
+  command and a surprise.
+- **The mode check sits after command dispatch and before anything that posts.**
+  After, so a muted thread still takes `|resume` — there must be a way out. Before,
+  because the DM and allowlist refusals post: a paused thread used to answer
+  non-allowlisted users with `:no_entry:`, so it was not actually silent. A guest's
+  explicit `|` command is still refused out loud; that is a deliberate poke.
+- **`|silent` costs nothing, the judged silence costs a turn.** The decision is made
+  in the daemon on a rule, not in Claude Code on judgement. `test_silence.py` asserts
+  `bridge.prompts == []` for a dropped message, not merely that nothing was posted —
+  an implementation that still spent a turn would pass the weaker check.
+- **A bare mention used to be dropped.** `@bot` with nothing else stripped to an empty
+  string and returned before any logic, so the most natural way to wake a silenced bot
+  did nothing, with no log line either. It now synthesises a prompt.
+- `|status` reports which of the three kinds of quiet is in force, who set it, when,
+  and how many messages were dropped since. Three kinds now: paused, mention-only, and
+  the agent's own judgement — all identical in Slack, so `|status` is the only place
+  they can be told apart.
+
+## Silence in the default mode
+
+- **An unaddressed message may get no reply at all.** The daemon wraps it in
+  `prompt.UNADDRESSED_NOTE` and the guest `CLAUDE.md` tells the agent to answer with
+  exactly `[[no-reply]]` when the message was not for it. `render.SILENT_MARKER` then
+  suppresses the whole message.
 - **The placeholder is the hard part.** `SlackRenderer.start()` used to post
   "_working…_" before the run began, which is already a reply — so silence is
   impossible unless posting is deferred. `quiet=True` (set for every non-mention,
-  non-DM turn) posts nothing until there is prose to post, and the first post
-  carries the answer rather than a placeholder. A mention or DM keeps the
-  placeholder, and retracts it with `chat_delete` if the marker arrives anyway.
-- **Tool activity does not break the silence.** A 🔧 line alone would be a reply
-  in a thread the agent then declines to answer, so in quiet mode only body text
-  triggers the first post. Errors do post, in both modes: a silent broken run is
+  non-DM turn) posts nothing until there is prose to post, and the first post carries
+  the answer rather than a placeholder. A mention or DM keeps the placeholder, and
+  retracts it with `chat_delete` if the marker arrives anyway.
+- **Tool activity does not break the silence.** A 🔧 line alone would be a reply in a
+  thread the agent then declines to answer, so in quiet mode only body text triggers
+  the first post. Errors do post, in both modes: a silent broken run is
   indistinguishable from a working one that had nothing to say.
-- **The marker mixed with prose is ignored and the prose posted.** Treating a
-  partial marker as silence would swallow real answers; the marker is stripped
-  from the text either way, so it can never reach Slack.
-- The matching regex is deliberately loose (`[[NO-REPLY]]`, `[[ no_reply ]]`,
-  `[[no reply]]`), because the model will not always reproduce the punctuation.
-- **This still costs a turn.** The judgement happens inside Claude Code, so an
-  unrelated conversation in an owned thread still spends a (small, cached) run per
-  message. A daemon-side heuristic would be cheaper and much worse at knowing.
+- **The marker mixed with prose is ignored and the prose posted.** The marker is
+  stripped from the text either way, so it can never reach Slack.
+- The matching regex is deliberately loose (`[[NO-REPLY]]`, `[[ no_reply ]]`).
 
-## Slack interaction gotchas
+## Author attribution
 
-- **`respond()` replaces the original message by default.** A reply to a button's
-  `response_url` needs `replace_original: False` or it destroys the message it came
-  from. This actually happened: a guest clicked Approve, got the ephemeral refusal,
-  and the click deleted the operator's buttons — leaving the request pending with no
-  way to answer it, which any channel member could trigger at will. Every
-  `respond()` payload in `approvals.py` now sets it, and `test_approvals` asserts
-  it.
-- **Recovery exists because a message can always be lost** — deleted by hand, or
-  buried. `|pending` lists approvals with a live waiter and `--repost` posts fresh
-  buttons. Only live waiters are listed: a waiter exists solely while the hook holds
-  its HTTP request open, so after a timeout or a daemon restart there is nothing to
-  answer and new buttons would be a lie.
+- **No identity used to reach Claude at all.** `_MENTION.sub("")` stripped every
+  `<@Uxxxx>` from the text and the sender's id travelled only as `requested_by` for
+  approval attribution. So the agent could not address anyone, and in a three-way
+  thread a bare answer gets assumed by whoever read it last.
+- Every forwarded message is now `<@U013P2T2ZHT>: text`. **Ids, not names**: Slack
+  renders the id as the person's name for whoever reads the reply and the same token
+  pings them, so one label does both jobs and **no profile data leaves the
+  workspace** — there is no `users.info` call, no cache, and a display name (which
+  anyone can set on themselves) never enters the prompt.
+- **Only the bot's own mention is stripped now.** Stripping all of them turned "ask
+  `<@U_BOB>` about the meter" into "ask about the meter". Falls back to stripping
+  everything when `auth_test` failed, since without our own id we cannot tell ours
+  from anyone else's.
+- **The agent can now ping people.** That is a capability it did not have; the only
+  control is the wording in the guest `CLAUDE.md`.
 
-## Who can do what## Slack rendering
+## Bot identity
 
-- **Slack does not speak Markdown.** Claude writes GitHub-flavoured Markdown and
-  Slack renders mrkdwn, which is a different language: `**bold**` shows literal
-  asterisks, `## Heading` shows a literal `##`, `[text](url)` shows brackets, and a
-  ```` ```lang ```` tag appears as the first line inside the block. `slackagent/mrkdwn.py`
-  converts; `render.py` applies it to both the blocks and the fallback `text`.
-- **Italic must be converted before bold.** The natural order is wrong: bold
-  becomes `*x*`, which the italic rule then rewrites to `_x_`, so every bold word
-  arrived italic. The italic pattern's lookarounds already refuse to match inside
-  `**x**`, so running it first is safe. The test caught this immediately.
-- **Nothing inside a fence or an inline code span may be rewritten.** Both routinely
-  contain `*`, `_` and `[]`, and altering them misrepresents a command or a diff.
-- **Tables are wrapped in a code fence**, because mrkdwn has no table syntax and
-  alignment is the only reason a table was drawn.
-- **Chunking must not split a fence.** A long message split mid-block leaves one
-  chunk unterminated and the next starting with a stray ```` ``` ````, so Slack
-  renders an endless code block followed by prose full of backticks. `_chunk`
-  balances fences across chunk boundaries.
+- Taken from `auth_test` at startup (`jimmybot`, `U0BPYD7P0EA`) and passed to the CLI
+  as `--append-system-prompt`, never hardcoded — the handle can change, and a guest
+  file that lies about it is worse than one that says nothing.
+- **The system prompt, not the first turn.** Keying it off `session.is_new` would
+  overload `turns` (which means "the CLI created the session"), and a first-turn
+  preamble is the first thing context compaction discards — in a long multi-person
+  thread, the one case where knowing your own handle matters. It also survives a
+  restart and a first run that died after `init`.
+- `auth_test` now governs four behaviours: the duplicate-`message` drop, self-mention
+  stripping, the identity in the system prompt, and self-exclusion from a transcript.
+  Its failure is still non-fatal, and each degrades on its own — the catch-up is
+  skipped outright rather than risk feeding the agent its own prose back.
+- This wired up `EXTRA_SYSTEM_PROMPT`, which `config.py` had read into a field that
+  nothing used.
+
+## Catch-up transcript
+
+- Gap-driven, not mode-driven: `threads.last_seen_ts` is the newest message forwarded
+  from a thread, so one mechanism covers a `|silent` stretch and a stretch when the
+  daemon was down.
+- **`|resume` from a pause advances the watermark; `|silent` does not.** `|pause`
+  promises nothing said in the thread reaches Claude, so backfilling it would make the
+  daemon lie in three places. Backfilling a `|silent` window is the entire point of
+  that mode. The asymmetry is the design, and both directions are tested.
+- **NULL means "start here", never "fetch everything"** — otherwise the first mention
+  in each existing thread drags its whole history into a prompt.
+- The mark is written **before** the run: "forwarded" is true when it is sent, and
+  advancing afterwards would make a crashed run replay a growing transcript on every
+  retry.
+- **Filtering is done in Python on `float(ts)`.** `conversations.replies` always
+  returns the thread parent whatever `oldest` says, and a Slack ts is not safely
+  lexicographic. Excluded: our own messages (by `bot_id` — a bot message carries a
+  user id too), subtyped messages, the message being answered, and `|` commands via
+  the shared `commands.is_local_command`, so the dispatcher and the transcript cannot
+  drift.
+- Bounded by construction and every bound reports itself: 20 messages, 600 chars each,
+  6000 total, newest kept, with a count of what was left out. Silently shortening a
+  conversation reads as a complete one.
+- Quoted text is fenced in `<msg n="NONCE">` spans with a fresh nonce per fetch, and
+  `prompt.neutralise` defangs `[[no-reply]]`, `[Daemon note`, `[end …]` and `</msg>`
+  in anything a person typed. Message text now enters the prompt from people who never
+  addressed the bot; a fixed tag they could type would not be a fence.
+- A 10s timeout and a bare `except` around the whole fetch: any failure degrades to no
+  transcript and a log line. Nothing is posted about it.
 
 ## Slack interaction gotchas
 

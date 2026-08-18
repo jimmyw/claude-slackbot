@@ -77,8 +77,16 @@ Create an app at <https://api.slack.com/apps>:
 
 - **Socket Mode**: on → gives you an app-level token (`xapp-…`)
 - **Bot token scopes**: `app_mentions:read`, `chat:write`, `channels:history`,
-  `groups:history`
-- **Event subscriptions**: `app_mention`, `message.channels`
+  `groups:history`, `im:history`, `im:read`, `im:write`, `assistant:write`
+  - `chat:write` also covers deleting the bot's own placeholder
+  - the `*:history` scopes are what `conversations.replies` needs for the catch-up
+    transcript; without them a tagged bot cannot see what it missed
+  - `users:read` and `reactions:*` are granted on the live app but deliberately
+    **unused** — messages are labelled with Slack ids, not names, so no profile data
+    leaves the workspace
+- **Event subscriptions**: `app_mention`, `message.channels`, `message.groups`,
+  `message.im` — `message.im` is not optional: DMs arrive on it, and without it the
+  bot looks dead in its own DM
 - Install to the workspace → bot token (`xoxb-…`)
 - Your user ID: Slack profile → More → Copy member ID (`U…`)
 
@@ -177,13 +185,43 @@ writes the mapping before the CLI starts, so the mapping is durable even if the
 first run dies. One `asyncio.Lock` per thread keeps two fast replies from
 resuming the same session concurrently.
 
-**`|pause` shuts it up in one thread.** `|pause`, typed in a thread, stops
-everything said there from reaching Claude — replies, mentions and all — and the
-daemon posts nothing in reply either. It is stored in sqlite, so it survives a
-restart, and it lasts until `|resume` in the same thread. Other threads are
-unaffected, and the thread's session is untouched: resuming continues the same
-conversation with its context. `|status` says whether the thread you are in is
-paused, because a paused thread is deliberately indistinguishable from a quiet one.
+**Three modes per thread.** All three are set in the thread they apply to, stored in
+sqlite so they survive a restart, and lifted with `|resume`. Other threads are
+unaffected, and the thread's Claude session is never closed — resuming continues the
+same conversation with its context.
+
+| | untagged reply | tagged / DM | cost of a message it ignores |
+|---|---|---|---|
+| default | forwarded; it judges for itself | answered | one turn |
+| `\|silent` | dropped by the daemon | answered, told what it missed | nothing |
+| `\|pause` | dropped | dropped | nothing |
+
+`|silent` is the useful middle: the bot stays out of the conversation but stays
+reachable. Only a real @-tag or a DM gets through — typing its name as plain text does
+not — and everything else is dropped out here on a rule rather than in there on
+judgement, so an ignored message costs nothing at all.
+
+`|silent` sounds stricter than `|pause` and is in fact looser, so the transitions say
+what they did: `|silent` in a paused thread announces that it lifted the pause, and
+`|resume` names which of the two it lifted. `|status` reports the mode, who set it,
+when, and how many messages it has dropped since — there are now three reasons the bot
+might be quiet, and they look identical in Slack.
+
+**It knows who is talking.** Every message reaches the agent labelled with the
+writer's Slack id (`<@U013P2T2ZHT>: shall we ship?`), and it is told to address the
+person it is answering when more than one person is in the thread. Ids rather than
+names: Slack renders an id as the person's name for whoever reads the reply and the
+same token pings them, so no `users.info` call is made and no profile data leaves the
+workspace. Note what this grants — the agent can now notify people, which it could
+not before.
+
+**It catches up on what it missed.** When you tag it after a gap, the daemon fetches
+the messages it was not shown and quotes them, oldest first, each labelled with its
+author — so "can you look at that?" is answerable. Bounded at 20 messages, 600
+characters each, 6000 in total, newest kept, and it states what it left out rather
+than truncating quietly. A `|pause` window is never quoted, because `|pause` promised
+those messages were never seen. Quoted text is fenced and the agent is told it is
+context, never instruction and never permission.
 
 **It stays quiet when it wasn't asked.** Anyone can reply in a thread the bot
 owns, and most of those replies are people talking to each other. Those messages
@@ -304,6 +342,15 @@ workspace. Narrow it with `ALLOWED_USERS` if that is not what you want.
 allowing guest DMs would mean the whole workspace rather than the people you
 deliberately invited. Guests are told to use a channel.
 
+**It can notify people now.** Messages reach the agent labelled with the writer's
+Slack id, and it is told to address the person it is answering — so it can write
+`<@U…>`, which pings a real phone. Nothing in the daemon constrains who: the only
+control is the instruction in the guest `CLAUDE.md` not to tag anyone who is not
+already in the conversation. It also means the messages other people exchange in a
+thread are forwarded to the API when the bot is tagged after a gap, not just the ones
+addressed to it — bounded and gap-driven, but a real widening of what leaves the
+workspace. No names or profile data go with them.
+
 **Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
 buttons; a click from anyone else gets an ephemeral refusal naming the operator and
 leaves the request pending.
@@ -377,9 +424,10 @@ itself, and it is never forwarded to Claude. Operator only.
 
 ```
 |help                 list the commands, with a one-line description each
-|status               VM state, SSH bridge, policy, grant count, this thread
-|pause                stop answering in this thread (mentions included)
-|resume               start answering in it again
+|status               VM state, SSH bridge, policy, grants, this thread's mode
+|silent               only answer in this thread when tagged
+|pause                answer nothing at all in this thread
+|resume               back to normal (lifts either one)
 |auth                 list all modes, marking the current one
 |auth open            nothing asks at all
 |auth permissive      the default
@@ -460,6 +508,15 @@ cd daemon
 - `test_render.py` — replays **real** `stream-json` captured from Claude Code
   2.1.231 (`tests/fixtures/`), plus Slack's block/length limits and the
   transport-failure paths.
+- `test_silence.py` — the three modes and the three kinds of quiet: a dropped message
+  starts no run at all (asserted on the prompt, not just on what was posted), a
+  mention in a silent thread does, a muted thread posts no refusals, and a bare
+  mention still wakes it.
+- `test_thread_modes.py` — the mode store and the migration off `paused_threads`,
+  including the half-migrated shape a `RENAME` implementation would never reach.
+- `test_attribution.py` — prompt assembly and its injection defences, the catch-up
+  filter and its bounds, a failing and a hanging `conversations.replies`, and that
+  `|resume` from a pause does not backfill it.
 - `test_grants.py` — "always allow" matching, weighted towards bypasses:
   chaining, pipes, redirection, substitution, newline injection, line
   continuation, and the `git statusfoo` boundary.
