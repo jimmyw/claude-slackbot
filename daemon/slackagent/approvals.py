@@ -75,6 +75,12 @@ class ApprovalService:
             channel_id, thread_ts, session_id, requested_by
         )
 
+    def run(self, run_token: str) -> PendingRun | None:
+        """The run behind a token, for anything else that has to authenticate the
+        guest — the MCP proxy resolves the Slack user this way, so identity is looked
+        up on the host rather than claimed by the VM."""
+        return self._runs.get(run_token)
+
     def unregister_run(self, run_token: str) -> None:
         """Drop a finished run and fail any approval still waiting on it."""
         run = self._runs.pop(run_token, None)

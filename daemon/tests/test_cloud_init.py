@@ -96,7 +96,8 @@ def main() -> int:
         " ".join(c) for c in d.get("runcmd", []) if isinstance(c, list)
     ]
     for path in ["/etc/claude-agent/approve.py", "/etc/claude-agent/settings.json",
-                 "/usr/local/bin/agent-exec", "/home/agent/CLAUDE.md"]:
+                 "/usr/local/bin/agent-exec", "/usr/local/bin/mcp-relay",
+                 "/home/agent/CLAUDE.md"]:
         line = next((i for i in installs if i.endswith(path)), None)
         check(f"{path} installed root-owned",
               line is not None and "-o root" in line, line)

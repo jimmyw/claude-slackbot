@@ -36,8 +36,10 @@ def check(label: str, condition: bool, detail: object = "") -> None:
 
 
 class FakeStream:
-    def __init__(self, lines: list[bytes]) -> None:
-        self._lines = lines
+    def __init__(self, lines=()) -> None:
+        self._lines = list(lines)
+        # Kept so a test can read the JSON job the daemon sent, not just the argv.
+        self.written: list[bytes] = []
 
     def __aiter__(self):
         async def gen():
@@ -48,8 +50,8 @@ class FakeStream:
     async def read(self, _n: int = -1) -> bytes:
         return b""
 
-    def write(self, _data: bytes) -> None:
-        return None
+    def write(self, data: bytes) -> None:
+        self.written.append(data)
 
     async def drain(self) -> None:
         return None
@@ -75,7 +77,9 @@ class FakeProcess:
         return None
 
 
-def make_config(tmp: Path, forward_agent: bool = False) -> Config:
+def make_config(
+    tmp: Path, forward_agent: bool = False, mcp_port: int = 9110
+) -> Config:
     key = tmp / "key"
     key.write_text("x")
     return Config(
@@ -89,7 +93,93 @@ def make_config(tmp: Path, forward_agent: bool = False) -> Config:
         approval_host="127.0.0.1", approval_port=9100, approval_timeout_s=600,
         tunnel_port_low=9101, tunnel_port_high=9199,
         db_path=tmp / "s.sqlite3", update_interval_s=0.0,
+        mcp_host="127.0.0.1", mcp_port=mcp_port,
+        mcp_tunnel_port_low=9201, mcp_tunnel_port_high=9299,
     )
+
+
+async def mcp_section(bridge_mod, captured, tmp, Bridge, Config) -> None:
+    """The second reverse tunnel, and the generated MCP config in the job."""
+    print("\n[4] the MCP tunnel is added only when there is something to reach")
+
+    import json
+
+    processes: list = []
+
+    async def fake_exec(*args, **kwargs):
+        captured.append(list(args))
+        process = bridge_mod.asyncio.subprocess  # placeholder to keep linters quiet
+        made = FakeProcess()
+        processes.append(made)
+        return made
+
+    bridge_mod.asyncio.create_subprocess_exec = fake_exec  # type: ignore[assignment]
+
+    config = make_config(tmp, mcp_port=9110)
+    bridge = Bridge(config)
+
+    captured.clear()
+    processes.clear()
+    async for _ in bridge.run(
+        prompt="hi", session_id="s", resume=False, run_token="t"
+    ):
+        pass
+    argv = captured[0]
+    job = json.loads(b"".join(processes[0].stdin.written))
+    check("no servers: exactly one -R, for approvals",
+          argv.count("-R") == 1, [a for a in argv if a.startswith("127.0.0.1:")])
+    check("no servers: no mcp port in the job", job.get("mcp_port") is None, job)
+    check("no servers: nothing is sent as an mcp config", job.get("mcp_config") == "",
+          job.get("mcp_config"))
+    check("no servers: NOT strict, so a guest-configured MCP setup is left alone — "
+          "this is what makes the change safe to deploy before the host file exists",
+          job.get("mcp_strict") is False, job.get("mcp_strict"))
+
+    captured.clear()
+    processes.clear()
+    async for _ in bridge.run(
+        prompt="hi", session_id="s", resume=False, run_token="t",
+        mcp_servers=("syslog", "varys"), mcp_strict=True,
+    ):
+        pass
+    argv = captured[0]
+    job = json.loads(b"".join(processes[0].stdin.written))
+    forwards = [argv[i + 1] for i, a in enumerate(argv) if a == "-R"]
+    check("with servers: two reverse tunnels", len(forwards) == 2, forwards)
+    check("the second targets the mcp proxy",
+          any(f.endswith(f":127.0.0.1:{config.mcp_port}") for f in forwards), forwards)
+    check("both bind guest loopback only",
+          all(f.startswith("127.0.0.1:") for f in forwards), forwards)
+    check("the mcp port comes from its own pool, not the approval pool",
+          config.mcp_tunnel_port_low <= job["mcp_port"] <= config.mcp_tunnel_port_high,
+          job["mcp_port"])
+    document = json.loads(job["mcp_config"])
+    check("every server points at the root-owned relay",
+          all(entry["command"] == bridge_mod.MCP_RELAY
+              for entry in document["mcpServers"].values()), document)
+    check("named so tool names stay mcp__<server>__<tool>, keeping existing grants "
+          "valid", sorted(document["mcpServers"]) == ["syslog", "varys"], document)
+    check("the relay is told the port and nothing else",
+          document["mcpServers"]["syslog"]["env"] == {"AGENT_MCP_PORT": str(job["mcp_port"])},
+          document["mcpServers"]["syslog"])
+    check("no credential of any kind travels to the guest",
+          "credential" not in job["mcp_config"] and "Cookie" not in job["mcp_config"])
+    check("strict is set, so the guest's own MCP config is ignored",
+          job["mcp_strict"] is True)
+
+    print("\n[4b] a caller entitled to nothing still gets strict")
+    captured.clear()
+    processes.clear()
+    async for _ in bridge.run(
+        prompt="hi", session_id="s", resume=False, run_token="t",
+        mcp_servers=(), mcp_strict=True,
+    ):
+        pass
+    job = json.loads(b"".join(processes[0].stdin.written))
+    check("an empty document is sent rather than no document — otherwise 'no servers "
+          "for you' would fall back to whatever the VM has",
+          json.loads(job["mcp_config"]) == {"mcpServers": {}}, job["mcp_config"])
+    check("and still no second tunnel", captured[0].count("-R") == 1, captured[0])
 
 
 async def main() -> int:
@@ -148,6 +238,8 @@ async def main() -> int:
             check("forwarding ON: -A present", "-A" in fargv, fargv)
             check("forwarding ON: no contradicting ForwardAgent=no",
                   "ForwardAgent=no" not in fargv, fargv)
+
+            await mcp_section(bridge_mod, captured, tmp, Bridge, Config)
             check("forwarding ON: still no TTY", "-T" in fargv, fargv)
 
             print("\n[3] probe() argv")

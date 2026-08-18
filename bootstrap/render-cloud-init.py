@@ -37,6 +37,10 @@ STAGING = "/var/lib/agent-provision"
 # memory/ is the one thing the agent must be able to write.
 PAYLOAD = [
     ("usr/local/bin/agent-exec", "/usr/local/bin/agent-exec", "0755", "root:root"),
+    # The guest's only route to the host's MCP proxy. Root-owned for the same reason
+    # as the gate: the agent must not be able to edit the path its own MCP traffic
+    # takes, or point it somewhere else.
+    ("usr/local/bin/mcp-relay", "/usr/local/bin/mcp-relay", "0755", "root:root"),
     (
         "etc/claude-agent/approve.py",
         "/etc/claude-agent/approve.py",

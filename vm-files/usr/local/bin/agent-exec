@@ -11,6 +11,9 @@
 #     "approval_port": 9101,
 #     "cwd":           "/home/agent/work"     (optional)
 #     "system_append": "<standing rules + the bot's Slack identity>"  (optional)
+#     "mcp_port":      9201,                  (optional; reverse-forwarded proxy port)
+#     "mcp_config":    "<--mcp-config document>"  (optional)
+#     "mcp_strict":    true|false             (ignore the guest's own MCP config)
 #   }
 #
 # stdout is the raw stream-json event stream; the daemon parses it line by line.
@@ -70,7 +73,8 @@ elif [[ ! -r "$HOME/.claude/.credentials.json" ]]; then
 fi
 
 JOB_FILE="$(mktemp)"
-trap 'rm -f "$JOB_FILE"' EXIT
+MCP_FILE=""
+trap 'rm -f "$JOB_FILE" ${MCP_FILE:+"$MCP_FILE"}' EXIT
 cat > "$JOB_FILE"
 [[ -s "$JOB_FILE" ]] || { log "empty job"; exit 64; }
 
@@ -99,6 +103,9 @@ APPROVAL_PORT="$(get approval_port)"
 CWD="$(get cwd)"
 POLICY="$(get policy)"
 SYSTEM_APPEND="$(get system_append)"
+MCP_PORT="$(get mcp_port)"
+MCP_CONFIG="$(get mcp_config)"
+MCP_STRICT="$(get mcp_strict)"
 [[ -n "$CWD" ]] || CWD=/home/agent/work
 
 for required in PROMPT SESSION_ID RUN_TOKEN APPROVAL_PORT; do
@@ -112,6 +119,14 @@ export AGENT_RUN_TOKEN="$RUN_TOKEN"
 # permissive (default) or strict. The hook reads this to decide whether Bash is
 # allowed unless deny-listed, or asked about every time.
 export AGENT_POLICY="${POLICY:-permissive}"
+
+# Where mcp-relay finds the host's MCP proxy. The port is reverse-forwarded for the
+# lifetime of this run, and carries no credential: the relay presents AGENT_RUN_TOKEN
+# and the host decides both who is asking and what they may call. The generated config
+# sets this per server too; exporting it as well keeps a hand-run relay debuggable.
+if [[ -n "$MCP_PORT" ]]; then
+    export AGENT_MCP_PORT="$MCP_PORT"
+fi
 
 cd "$CWD"
 
@@ -135,13 +150,28 @@ if [[ -n "$SYSTEM_APPEND" ]]; then
     ARGS+=(--append-system-prompt "$SYSTEM_APPEND")
 fi
 
+# MCP servers, if the host offered any for this caller. Written to a file rather than
+# passed as a JSON string so the value cannot be mangled by shell quoting.
+if [[ -n "$MCP_CONFIG" ]]; then
+    MCP_FILE="$(mktemp)"
+    printf '%s' "$MCP_CONFIG" > "$MCP_FILE"
+    ARGS+=(--mcp-config "$MCP_FILE")
+fi
+
+# Only the servers the host handed us. Without this the CLI would ALSO load whatever
+# is in the guest's own ~/.claude.json — which is exactly the configuration, and the
+# credentials, this proxy exists to remove.
+if [[ "$MCP_STRICT" == "true" ]]; then
+    ARGS+=(--strict-mcp-config)
+fi
+
 if [[ "$RESUME" == "true" ]]; then
     ARGS+=(--resume "$SESSION_ID")
 else
     ARGS+=(--session-id "$SESSION_ID")
 fi
 
-log "starting session=$SESSION_ID resume=$RESUME cwd=$CWD policy=$AGENT_POLICY"
+log "starting session=$SESSION_ID resume=$RESUME cwd=$CWD policy=$AGENT_POLICY mcp=${MCP_PORT:-none}${MCP_STRICT:+ strict}"
 
 # stdin is already consumed by the job read; give the CLI /dev/null so it does
 # not sit waiting for piped input.

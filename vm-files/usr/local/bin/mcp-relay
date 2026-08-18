@@ -1,0 +1,119 @@
+#!/usr/bin/env python3
+"""Relay one MCP server's stdio to the daemon's proxy on the host.
+
+Claude Code runs this as an ordinary stdio MCP server. It holds no credential and
+knows nothing about the upstream: it opens the reverse-forwarded loopback port, names
+the server it wants and the run it belongs to, and then copies bytes. MCP's stdio
+framing is newline-delimited JSON-RPC, so nothing here has to understand the protocol.
+
+Usage (from the generated --mcp-config):
+    mcp-relay <server-name>
+with AGENT_MCP_PORT and AGENT_RUN_TOKEN in the environment.
+
+Root-owned and outside /home/agent on purpose: the agent must not be able to edit its
+own route to the host. Any failure exits non-zero with a line on stderr, so the CLI
+reports a server that failed to start rather than hanging — the same fail-closed shape
+as the approval hook.
+"""
+from __future__ import annotations
+
+import json
+import os
+import socket
+import sys
+import threading
+
+PROTOCOL = 1
+CONNECT_TIMEOUT_S = 10.0
+
+
+def fail(message: str) -> None:
+    sys.stderr.write(f"mcp-relay: {message}\n")
+    sys.stderr.flush()
+    raise SystemExit(69)
+
+
+def pump(source, sink, on_eof=None) -> None:
+    """Copy line by line until EOF.
+
+    Line at a time, not read(n): MCP framing is newline-delimited JSON, and a buffered
+    read(65536) on a pipe blocks until 65536 bytes arrive — which for a protocol whose
+    messages are a few hundred bytes means it blocks for ever.
+    """
+    try:
+        while line := source.readline():
+            sink.write(line)
+            sink.flush()
+    except (OSError, ValueError):
+        pass
+    finally:
+        if on_eof is not None:
+            try:
+                on_eof()
+            except OSError:
+                pass
+
+
+def main() -> int:
+    if len(sys.argv) != 2:
+        fail("usage: mcp-relay <server-name>")
+    server = sys.argv[1]
+
+    port = os.environ.get("AGENT_MCP_PORT", "").strip()
+    token = os.environ.get("AGENT_RUN_TOKEN", "").strip()
+    if not port or not token:
+        fail("AGENT_MCP_PORT / AGENT_RUN_TOKEN are not set, so there is no route "
+             "to the host's MCP proxy")
+
+    try:
+        connection = socket.create_connection(
+            ("127.0.0.1", int(port)), timeout=CONNECT_TIMEOUT_S
+        )
+    except (OSError, ValueError) as exc:
+        fail(f"cannot reach the MCP proxy on 127.0.0.1:{port}: {exc}")
+
+    # The handshake names the run and the server. Identity is NOT claimed here: the
+    # host maps the run token to the Slack user itself, so this cannot lie about who
+    # is asking.
+    hello = {"protocol": PROTOCOL, "run_token": token, "server": server}
+    try:
+        connection.sendall(json.dumps(hello).encode() + b"\n")
+    except OSError as exc:
+        fail(f"could not send the handshake: {exc}")
+
+    connection.settimeout(None)
+    sock_in = connection.makefile("rb")
+    sock_out = connection.makefile("wb")
+
+    # Start forwarding requests BEFORE reading anything back. The proxy answers nothing
+    # until the client asks, so waiting for a first line here first would deadlock:
+    # the CLI would be waiting to send `initialize` while we waited to receive it.
+    threading.Thread(
+        target=pump,
+        args=(sys.stdin.buffer, sock_out,
+              lambda: connection.shutdown(socket.SHUT_WR)),
+        daemon=True,
+    ).start()
+
+    # A refusal arrives as a bare object with an "error" key and no "jsonrpc", which
+    # cannot be confused with a protocol message. Report it on stderr and exit
+    # non-zero, so the CLI shows a server that failed to start instead of one that
+    # looks healthy and answers nothing.
+    first = sock_in.readline()
+    if not first:
+        fail("the MCP proxy closed the connection without a reply")
+    try:
+        message = json.loads(first)
+    except json.JSONDecodeError:
+        message = None
+    if isinstance(message, dict) and "error" in message and "jsonrpc" not in message:
+        fail(f"refused by the MCP proxy: {message['error']}")
+
+    sys.stdout.buffer.write(first)
+    sys.stdout.buffer.flush()
+    pump(sock_in, sys.stdout.buffer)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
