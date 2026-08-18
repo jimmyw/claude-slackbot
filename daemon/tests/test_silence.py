@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 from slackagent.render import SILENT_MARKER
+from slackagent.store import MODE_ACTIVE, MODE_PAUSED
 
 # Reused rather than duplicated: this is the same fake-Slack, fake-config Daemon.
 from tests.test_commands import AUTHORIZED, GUEST, make_daemon
@@ -115,7 +116,7 @@ async def main() -> int:
         check("|pause confirms and names the way out",
               "Paused" in reply and "|resume" in reply, reply[:90])
         check("the pause is recorded",
-              daemon._store.is_thread_paused("C1", "1.1"))  # noqa: SLF001
+              daemon._store.thread_mode("C1", "1.1") == MODE_PAUSED)  # noqa: SLF001
 
         bridge, posted = await turn(daemon, "Yes.", is_mention=True)
         check("a mention in a paused thread starts no run", bridge.prompts == [],
@@ -133,7 +134,7 @@ async def main() -> int:
         check("|resume is answered while paused", "Answering here again" in reply,
               reply[:80])
         check("the pause is gone",
-              not daemon._store.is_thread_paused("C1", "1.1"))  # noqa: SLF001
+              daemon._store.thread_mode("C1", "1.1") == MODE_ACTIVE)  # noqa: SLF001
         reply = await command("|resume")
         check("resuming an unpaused thread changes nothing",
               "was not paused" in reply, reply[:60])
@@ -143,10 +144,12 @@ async def main() -> int:
               bridge.prompts and posted, (bridge.prompts, posted))
 
         # A pause is per thread: another thread in the same channel is unaffected.
-        daemon._store.pause_thread("C1", "1.1", AUTHORIZED)  # noqa: SLF001
+        daemon._store.set_thread_mode(  # noqa: SLF001
+            "C1", "1.1", MODE_PAUSED, AUTHORIZED)
         check("a different thread is not paused",
-              not daemon._store.is_thread_paused("C1", "9.9"))  # noqa: SLF001
-        daemon._store.resume_thread("C1", "1.1")  # noqa: SLF001
+              daemon._store.thread_mode("C1", "9.9") == MODE_ACTIVE)  # noqa: SLF001
+        daemon._store.set_thread_mode(  # noqa: SLF001
+            "C1", "1.1", MODE_ACTIVE, AUTHORIZED)
 
     print()
     if failures:

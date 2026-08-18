@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..store import MODE_PAUSED
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "pause"
@@ -35,7 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(ctx: Context, args: argparse.Namespace) -> None:
-    if not ctx.store.pause_thread(ctx.channel, ctx.thread_ts, ctx.user):
+    previous = ctx.store.set_thread_mode(
+        ctx.channel, ctx.thread_ts, MODE_PAUSED, ctx.user
+    )
+    if previous == MODE_PAUSED:
         await ctx.say(
             f"Already paused here. `{COMMAND_PREFIX}resume` to start answering "
             "again."

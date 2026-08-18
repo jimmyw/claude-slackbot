@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS threads (
     created_at   INTEGER NOT NULL,
     last_used_at INTEGER NOT NULL,
     turns        INTEGER NOT NULL DEFAULT 0,
+    -- High-water mark: the ts of the newest message forwarded to Claude from this
+    -- thread. Drives the catch-up transcript. NULL means "start here" — never
+    -- "fetch everything", or the first mention in an old thread would drag its
+    -- whole history into the prompt.
+    last_seen_ts TEXT,
     PRIMARY KEY (channel_id, thread_ts)
 );
 
@@ -58,15 +63,25 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_by TEXT
 );
 
--- Threads the operator has muted with |pause. A separate table rather than a
--- column on `threads`, for two reasons: a new table needs no migration (CREATE
--- TABLE IF NOT EXISTS does create one that is absent, unlike a column), and a
--- thread can be paused before the bot has ever run in it.
-CREATE TABLE IF NOT EXISTS paused_threads (
+-- Threads the operator has taken out of the default mode with |silent or |pause.
+-- A separate table rather than a column on `threads`, for two reasons: a new table
+-- needs no migration (CREATE TABLE IF NOT EXISTS does create one that is absent,
+-- unlike a column), and a thread can be muted before the bot has ever run in it.
+--
+-- 'active' is the ABSENCE of a row, so |resume is a DELETE and a fresh thread costs
+-- no write. The CHECK makes 'active' unstorable, so "a row exists" can only ever
+-- mean muted — a future upsert cannot silently mute every thread it touches.
+CREATE TABLE IF NOT EXISTS thread_modes (
     channel_id TEXT    NOT NULL,
     thread_ts  TEXT    NOT NULL,
-    paused_at  INTEGER NOT NULL,
-    paused_by  TEXT,
+    -- 'silent': forward only when explicitly addressed (a mention or a DM).
+    -- 'paused': forward nothing at all.
+    mode       TEXT    NOT NULL CHECK (mode IN ('silent', 'paused')),
+    set_at     INTEGER NOT NULL,
+    set_by     TEXT,
+    -- Messages dropped since the mode was set. Without a count, "why is it quiet"
+    -- is unanswerable without the daemon log, which is not in Slack.
+    dropped    INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (channel_id, thread_ts)
 );
 
@@ -88,6 +103,36 @@ CREATE TABLE IF NOT EXISTS grants (
     UNIQUE (tool_name, pattern, match_type)
 );
 """
+
+
+# The three per-thread reply modes. 'active' is never stored — it is the absence
+# of a thread_modes row — but it is the value thread_mode() reports, so it belongs
+# here beside the others.
+MODE_ACTIVE = "active"
+MODE_SILENT = "silent"
+MODE_PAUSED = "paused"
+THREAD_MODES = (MODE_ACTIVE, MODE_SILENT, MODE_PAUSED)
+
+
+@dataclass(frozen=True)
+class ThreadMode:
+    channel_id: str
+    thread_ts: str
+    mode: str
+    set_at: int
+    set_by: str
+    dropped: int
+
+
+def _thread_mode(row: sqlite3.Row) -> ThreadMode:
+    return ThreadMode(
+        channel_id=row["channel_id"],
+        thread_ts=row["thread_ts"],
+        mode=row["mode"],
+        set_at=int(row["set_at"]),
+        set_by=row["set_by"] or "",
+        dropped=int(row["dropped"]),
+    )
 
 
 @dataclass(frozen=True)
@@ -134,6 +179,17 @@ class Store:
                 for row in self._db.execute(f"PRAGMA table_info({table})")
             }
 
+        def tables() -> set[str]:
+            # PRAGMA table_info on a table that does not exist returns an empty
+            # set rather than raising, so columns() cannot tell "absent" from "has
+            # no columns". Anything table-level has to ask sqlite_master.
+            return {
+                row["name"]
+                for row in self._db.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+
         # approvals.requested_by — a plain add, no constraint change.
         if "requested_by" not in columns("approvals"):
             self._db.execute("ALTER TABLE approvals ADD COLUMN requested_by TEXT")
@@ -171,6 +227,33 @@ class Store:
                 FROM grants;
                 DROP TABLE grants;
                 ALTER TABLE grants_migrated RENAME TO grants;
+                """
+            )
+
+        # threads.last_seen_ts — a plain add, no constraint change.
+        if "last_seen_ts" not in columns("threads"):
+            self._db.execute("ALTER TABLE threads ADD COLUMN last_seen_ts TEXT")
+
+        # paused_threads -> thread_modes, when |pause was the only mode.
+        #
+        # NOT a rename. executescript(SCHEMA) runs before this method, so
+        # thread_modes already exists (empty) by now and
+        #   ALTER TABLE paused_threads RENAME TO thread_modes
+        # fails with "there is already another table or index with this name".
+        # Copy and drop, the same shape as the grants rebuild above.
+        #
+        # INSERT OR IGNORE, not INSERT: a database interrupted between the copy and
+        # the drop would otherwise fail on the primary key for ever. Every existing
+        # row meant exactly one thing — paused — so unlike the grants migration
+        # there is no legacy marker to misread.
+        if "paused_threads" in tables():
+            self._db.executescript(
+                """
+                INSERT OR IGNORE INTO thread_modes
+                    (channel_id, thread_ts, mode, set_at, set_by)
+                SELECT channel_id, thread_ts, 'paused', paused_at, paused_by
+                FROM paused_threads;
+                DROP TABLE paused_threads;
                 """
             )
 
@@ -244,49 +327,137 @@ class Store:
             )
             self._db.commit()
 
-    # -- pause --------------------------------------------------------------
+    # -- thread modes -------------------------------------------------------
 
-    def pause_thread(self, channel_id: str, thread_ts: str, paused_by: str) -> bool:
-        """Mute a thread. False if it was already paused."""
-        with self._lock:
-            cursor = self._db.execute(
-                "INSERT OR IGNORE INTO paused_threads "
-                "(channel_id, thread_ts, paused_at, paused_by) VALUES (?, ?, ?, ?)",
-                (channel_id, thread_ts, int(time.time()), paused_by),
-            )
-            self._db.commit()
-            return cursor.rowcount > 0
-
-    def resume_thread(self, channel_id: str, thread_ts: str) -> bool:
-        """Unmute a thread. False if it was not paused."""
-        with self._lock:
-            cursor = self._db.execute(
-                "DELETE FROM paused_threads WHERE channel_id = ? AND thread_ts = ?",
-                (channel_id, thread_ts),
-            )
-            self._db.commit()
-            return cursor.rowcount > 0
-
-    def is_thread_paused(self, channel_id: str, thread_ts: str) -> bool:
+    def thread_mode(self, channel_id: str, thread_ts: str) -> str:
+        """The thread's mode. MODE_ACTIVE when there is no row."""
         with self._lock:
             row = self._db.execute(
-                "SELECT 1 FROM paused_threads "
+                "SELECT mode FROM thread_modes "
                 "WHERE channel_id = ? AND thread_ts = ?",
                 (channel_id, thread_ts),
             ).fetchone()
-        return row is not None
+        return row["mode"] if row is not None else MODE_ACTIVE
 
-    def list_paused(self) -> list[tuple[str, str, int, str]]:
-        """(channel_id, thread_ts, paused_at, paused_by), oldest pause first."""
+    def thread_mode_entry(
+        self, channel_id: str, thread_ts: str
+    ) -> ThreadMode | None:
+        """The full row, or None when the thread is active.
+
+        Separate from thread_mode() because the commands need to say who set the
+        mode and when, while the hot path on every message needs only the word.
+        """
         with self._lock:
-            rows = self._db.execute(
-                "SELECT channel_id, thread_ts, paused_at, paused_by "
-                "FROM paused_threads ORDER BY paused_at"
-            ).fetchall()
-        return [
-            (r["channel_id"], r["thread_ts"], int(r["paused_at"]), r["paused_by"] or "")
-            for r in rows
-        ]
+            row = self._db.execute(
+                "SELECT channel_id, thread_ts, mode, set_at, set_by, dropped "
+                "FROM thread_modes WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            ).fetchone()
+        return _thread_mode(row) if row is not None else None
+
+    def set_thread_mode(
+        self, channel_id: str, thread_ts: str, mode: str, set_by: str
+    ) -> str:
+        """Set the mode and return the PREVIOUS one.
+
+        Returning the previous mode is load-bearing: |silent, |pause and |resume all
+        have to tell the operator what actually changed, and |silent typed in a
+        paused thread LOOSENS the mute — announcing that is the difference between a
+        clear command and a surprise. Read-modify-write in one locked call so the
+        answer cannot be stale.
+        """
+        if mode not in THREAD_MODES:
+            raise ValueError(f"unknown thread mode: {mode!r}")
+        now = int(time.time())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT mode FROM thread_modes "
+                "WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            ).fetchone()
+            previous = row["mode"] if row is not None else MODE_ACTIVE
+
+            if mode == MODE_ACTIVE:
+                self._db.execute(
+                    "DELETE FROM thread_modes "
+                    "WHERE channel_id = ? AND thread_ts = ?",
+                    (channel_id, thread_ts),
+                )
+            else:
+                # dropped resets with the mode: the count answers "how much have I
+                # missed since I silenced this", not "ever".
+                self._db.execute(
+                    "INSERT INTO thread_modes "
+                    "(channel_id, thread_ts, mode, set_at, set_by, dropped) "
+                    "VALUES (?, ?, ?, ?, ?, 0) "
+                    "ON CONFLICT(channel_id, thread_ts) DO UPDATE SET "
+                    "mode = excluded.mode, set_at = excluded.set_at, "
+                    "set_by = excluded.set_by, dropped = 0",
+                    (channel_id, thread_ts, mode, now, set_by),
+                )
+            self._db.commit()
+            return previous
+
+    def note_dropped(self, channel_id: str, thread_ts: str) -> None:
+        """Count one message the mode kept from Claude."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE thread_modes SET dropped = dropped + 1 "
+                "WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            )
+            self._db.commit()
+
+    def list_thread_modes(self, mode: str | None = None) -> list[ThreadMode]:
+        """Every non-active thread, oldest first, optionally one mode only."""
+        sql = (
+            "SELECT channel_id, thread_ts, mode, set_at, set_by, dropped "
+            "FROM thread_modes"
+        )
+        params: tuple[str, ...] = ()
+        if mode is not None:
+            sql += " WHERE mode = ?"
+            params = (mode,)
+        sql += " ORDER BY set_at"
+        with self._lock:
+            rows = self._db.execute(sql, params).fetchall()
+        return [_thread_mode(row) for row in rows]
+
+    # -- the catch-up watermark ---------------------------------------------
+
+    def mark_forwarded(self, channel_id: str, thread_ts: str, message_ts: str) -> None:
+        """Record that message_ts was forwarded to Claude.
+
+        Monotonic, so a slow turn finishing after a fast one cannot rewind the mark
+        and cause the next mention to replay messages the agent has already seen.
+
+        CAST to REAL rather than comparing the strings: Slack timestamps are not
+        safely lexicographic ('999999999.000100' < '1724000000.000001' is False).
+        Ten-digit epochs hold until 2286, but the cast is free.
+
+        Deliberately a targeted UPDATE of one column. Reading the row and writing it
+        back whole would reset `turns`, and turns == 0 is what selects --session-id
+        over --resume — that is a permanently broken thread, from an innocuous
+        refactor.
+        """
+        with self._lock:
+            self._db.execute(
+                "UPDATE threads SET last_seen_ts = ? "
+                "WHERE channel_id = ? AND thread_ts = ? AND ("
+                "    last_seen_ts IS NULL"
+                "    OR CAST(last_seen_ts AS REAL) < CAST(? AS REAL))",
+                (message_ts, channel_id, thread_ts, message_ts),
+            )
+            self._db.commit()
+
+    def last_forwarded_ts(self, channel_id: str, thread_ts: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT last_seen_ts FROM threads "
+                "WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            ).fetchone()
+        return row["last_seen_ts"] if row is not None else None
 
     # -- settings -----------------------------------------------------------
 
