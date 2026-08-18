@@ -231,6 +231,44 @@ terminate on the host; `mcp-relay` in the guest holds none.
   proxy over a real socket, and the fake records every call it receives, which is how "a
   blocked call never leaves the host" is proved rather than asserted.
 
+## What the MCP migration taught (terra, 2026-08-18)
+
+The three servers now run through the host proxy; the VM holds nothing. Four things
+were not in the plan:
+
+- **There was a FOURTH credential.** `varys` authenticates to `varys.tibber.com` via
+  Okta and caches its session cookies in `~/.config/tibber-varys/session.json` — not in
+  `.claude.json` at all, so no amount of reading the MCP config would have found it.
+  Its `env` block was empty, which is what gave it away. Copied to the host at the same
+  path (the daemon runs as its own user, so `Path.home()` resolves) and removed from the
+  guest. **A stdio MCP server can cache credentials anywhere; check what it actually
+  reads, not just how it is configured.**
+- **The guest's OAuth `discoveryState` does not carry a token endpoint.** It holds
+  `authorizationServerUrl` and `oauthMetadataFound`, nothing more, so the migration
+  writes `token_url` empty and says so. Fetch it from
+  `<server>/.well-known/oauth-authorization-server` — for esp-crash that is
+  `https://mcp-esp-crash.wennlund.nu/token`, `grant_types_supported` including
+  `refresh_token`.
+- **Without `token_url` the HTTP upstream sends NO Authorization header at all** and the
+  upstream answers 401, which reads like an expired credential rather than a missing
+  one. If an OAuth upstream 401s, check whether the oauth block is `configured` before
+  suspecting the token.
+- **Re-running the migration clobbered the hand-finished entries.** A migrated entry
+  almost always needs finishing — a stdio command repointed at a host clone, a
+  `token_url` the guest never had — and the second run regenerated both from the guest,
+  which is how esp-crash and varys broke at once. `60-migrate-mcp.sh` now leaves
+  existing servers alone (and keeps ones the guest no longer mentions, so a run after
+  `--remove-guest` cannot empty the config); `OVERWRITE=1` restores the old behaviour.
+
+`varys` runs from a host clone at `~/.local/share/slack-claude/mcp/varys` with its own
+venv (`httpx`, `python-socketio`, `mcp`). Its `varys_mcp.py` IS tracked in the repo — the
+guest's copy was not local work — but it was `0775 agent:agent` inside the workspace, so
+the agent could rewrite the server holding its own credential. On the host it cannot.
+
+Rotation is proven against the real authorisation server, not only in tests: a forced
+refresh minted a new access token, the server rotated the refresh token, and both were
+persisted to `mcp_tokens`. The credential the host now presents is one it minted itself.
+
 ## Slack rendering
 
 - **Slack does not speak Markdown.** Claude writes GitHub-flavoured Markdown and

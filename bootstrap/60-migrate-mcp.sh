@@ -4,6 +4,12 @@
 #   ./bootstrap/60-migrate-mcp.sh <vm-ip>                 write the host config
 #   ./bootstrap/60-migrate-mcp.sh <vm-ip> --remove-guest  then strip the guest's copies
 #
+# Servers already in the host config are LEFT ALONE; only new ones are added. A migrated
+# entry nearly always needs finishing by hand -- a stdio command repointed at a host
+# clone, an oauth token_url the guest's discovery blob did not carry, a rotated
+# credential -- and a second run overwriting that is exactly how a working setup breaks
+# (it happened during the first migration). OVERWRITE=1 regenerates from the guest.
+#
 # Why: an MCP server configured inside the VM carries its credential there, and that is
 # outside both the VM boundary and the approval gate. One approved Bash call is
 # arbitrary code as `agent`, and from there the credential can be read and the upstream
@@ -67,6 +73,12 @@ import os
 import sys
 
 guest = json.loads(os.environ["GUEST_JSON"] or "{}")
+try:
+    with open(os.environ["OUT"]) as handle:
+        existing = (json.load(handle) or {}).get("servers") or {}
+except (OSError, ValueError):
+    existing = {}
+overwrite = os.environ.get("OVERWRITE") == "1"
 oauth_store = json.loads(os.environ["GUEST_OAUTH"] or "{}")
 grants = [g.strip() for g in os.environ["GRANTS"].splitlines() if g.strip()]
 out = os.environ["OUT"]
@@ -93,6 +105,12 @@ servers: dict[str, dict] = {}
 for source in sources:
     for name, cfg in source.items():
         if name in servers:
+            continue
+        if name in existing and not overwrite:
+            # Keep what is already here: it has been finished by hand, and the
+            # credential may since have been rotated.
+            servers[name] = existing[name]
+            print(f"      {name}: kept the existing host entry, unchanged")
             continue
         kind = cfg.get("type") or ("stdio" if cfg.get("command") else "http")
         entry: dict = {"type": kind}
@@ -125,6 +143,12 @@ for source in sources:
         entry["credential"] = credential
         entry["tools"] = {"allow": sorted(allowed.get(name, []))}
         servers[name] = entry
+
+# Anything already configured that the guest no longer mentions is kept as well --
+# after --remove-guest the guest mentions nothing, and a later run must not empty the
+# host config.
+for name, entry in existing.items():
+    servers.setdefault(name, entry)
 
 document = {"servers": servers}
 with open(out, "w") as handle:
@@ -164,7 +188,7 @@ if [[ "$REMOVE_GUEST" == "--remove-guest" ]]; then
     echo
     echo "==> Removing the guest's copies"
     # Do this only once the host path is proven, since it takes the guest's MCP away.
-    ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" 'sudo python3 -' </dev/null <<'PY' || true
+    ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" 'sudo python3 -' <<'PY' || true
 import json
 
 for path, key in (
@@ -188,6 +212,14 @@ for path, key in (
         json.dump(document, handle, indent=2)
     print(f"    {path}: removed {key}")
 PY
+    # A stdio MCP server can also cache its own credential OUTSIDE .claude.json --
+    # varys keeps an Okta session under ~/.config/tibber-varys, which is a fourth
+    # credential the first pass of this migration did not know about. Copy it to the
+    # host first (same path, since the daemon runs as its own user) or the server
+    # cannot authenticate once it runs out here.
+    ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" \
+        'sudo rm -rf /home/agent/.config/tibber-varys' </dev/null || true
+    echo "    removed the guest's cached varys Okta session"
     echo "    Now rotate the upstream credentials: the guest's copies existed, so"
     echo "    treat them as exposed. Reissue the syslog cookie, re-authorise"
     echo "    esp-crash on the host, and roll the varys token."

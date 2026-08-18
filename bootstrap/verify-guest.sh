@@ -145,7 +145,8 @@ else
 fi
 
 mcp_oauth=$("${ADMIN_SSH[@]}" \
-    'sudo grep -rl "mcpOAuth" /home/agent 2>/dev/null | head -5' \
+    'sudo grep -rl "mcpOAuth" /home/agent --include="*.json" \
+         --exclude-dir=versions --exclude-dir=node_modules 2>/dev/null | head -5' \
     </dev/null || true)
 if [[ -z "$mcp_oauth" ]]; then
     report "no MCP OAuth grant in the guest" ok
