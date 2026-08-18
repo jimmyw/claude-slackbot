@@ -10,6 +10,7 @@
 #     "run_token":     "<opaque per-run token>",
 #     "approval_port": 9101,
 #     "cwd":           "/home/agent/work"     (optional)
+#     "system_append": "<standing rules + the bot's Slack identity>"  (optional)
 #   }
 #
 # stdout is the raw stream-json event stream; the daemon parses it line by line.
@@ -97,6 +98,7 @@ RUN_TOKEN="$(get run_token)"
 APPROVAL_PORT="$(get approval_port)"
 CWD="$(get cwd)"
 POLICY="$(get policy)"
+SYSTEM_APPEND="$(get system_append)"
 [[ -n "$CWD" ]] || CWD=/home/agent/work
 
 for required in PROMPT SESSION_ID RUN_TOKEN APPROVAL_PORT; do
@@ -124,6 +126,14 @@ ARGS=(
     --verbose
     --settings "$SETTINGS"
 )
+
+# Who the agent is in Slack, and how to address people. In the system prompt rather
+# than the turn because a preamble delivered once is the first thing context
+# compaction throws away, and a long multi-person thread is exactly where it matters.
+# Optional: an older daemon sends no such field, and the CLI must still run.
+if [[ -n "$SYSTEM_APPEND" ]]; then
+    ARGS+=(--append-system-prompt "$SYSTEM_APPEND")
+fi
 
 if [[ "$RESUME" == "true" ]]; then
     ARGS+=(--resume "$SESSION_ID")
