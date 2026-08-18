@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 
+from ..store import MODE_PAUSED
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "status"
@@ -32,8 +33,10 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     policy = ctx.store.get_setting("agent_policy", ctx.config.agent_policy)
     # Reported because a paused thread is silent by design, which is otherwise
     # indistinguishable from a broken one — and |status is where you look.
-    here = ctx.store.is_thread_paused(ctx.channel, ctx.thread_ts)
-    paused_elsewhere = len(ctx.store.list_paused()) - (1 if here else 0)
+    here = ctx.store.thread_mode(ctx.channel, ctx.thread_ts) == MODE_PAUSED
+    paused_elsewhere = len(ctx.store.list_thread_modes(MODE_PAUSED)) - (
+        1 if here else 0
+    )
 
     await ctx.say(
         f"VM `{ctx.config.vm_domain}`: {state}{f' at {ip}' if ip else ''}\n"

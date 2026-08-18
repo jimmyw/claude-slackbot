@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import datetime
 
+from ..store import MODE_ACTIVE, MODE_PAUSED
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "resume"
@@ -28,14 +29,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run(ctx: Context, args: argparse.Namespace) -> None:
-    paused = {
-        (channel, thread): (at, by)
-        for channel, thread, at, by in ctx.store.list_paused()
-    }
-    entry = paused.get((ctx.channel, ctx.thread_ts))
+    # Read the row before clearing it: the confirmation names who muted the thread
+    # and when, which is gone the moment the row is deleted.
+    entry = ctx.store.thread_mode_entry(ctx.channel, ctx.thread_ts)
+    previous = ctx.store.set_thread_mode(
+        ctx.channel, ctx.thread_ts, MODE_ACTIVE, ctx.user
+    )
 
-    if not ctx.store.resume_thread(ctx.channel, ctx.thread_ts):
-        elsewhere = len(paused)
+    if previous == MODE_ACTIVE:
+        elsewhere = len(ctx.store.list_thread_modes())
         note = (
             f" {elsewhere} other thread{'s' if elsewhere != 1 else ''} "
             f"{'are' if elsewhere != 1 else 'is'} paused; a pause only ever "
@@ -46,10 +48,14 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         return
 
     since = ""
-    if entry:
-        when = datetime.datetime.fromtimestamp(entry[0]).strftime("%Y-%m-%d %H:%M")
-        who = f" by <@{entry[1]}>" if entry[1] else ""
-        since = f" Paused{who} at {when}."
+    if entry is not None:
+        when = datetime.datetime.fromtimestamp(entry.set_at).strftime("%Y-%m-%d %H:%M")
+        who = f" by <@{entry.set_by}>" if entry.set_by else ""
+        dropped = (
+            f" {entry.dropped} message{'s' if entry.dropped != 1 else ''} went "
+            "unseen." if entry.dropped else ""
+        )
+        since = f" Paused{who} at {when}.{dropped}"
     await ctx.say(
         f":white_check_mark: Answering here again.{since} Anything said while "
         "paused was not seen — say it again if it still matters."

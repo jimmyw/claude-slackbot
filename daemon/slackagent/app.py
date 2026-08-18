@@ -23,7 +23,7 @@ from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalServi
 from .bridge import Bridge
 from .config import Config, ConfigError
 from .render import SILENT_MARKER, SlackRenderer
-from .store import Store
+from .store import MODE_PAUSED, Store
 from .vmctl import VmControl
 
 log = logging.getLogger("slackagent")
@@ -219,7 +219,9 @@ class Daemon:
         # |resume, or there would be no way out of it. Everything else in the thread
         # is dropped — mentions included, since a pause the bot argues with is not a
         # pause. Nothing is posted; the log line is the only trace.
-        if await asyncio.to_thread(self._store.is_thread_paused, channel, thread_ts):
+        mode = await asyncio.to_thread(self._store.thread_mode, channel, thread_ts)
+        if mode == MODE_PAUSED:
+            await asyncio.to_thread(self._store.note_dropped, channel, thread_ts)
             log.info(
                 "thread is paused; not forwarding (channel=%s thread=%s user=%s)",
                 channel, thread_ts, user,
