@@ -23,6 +23,8 @@ from . import commands
 from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalService
 from .bridge import Bridge
 from .config import Config, ConfigError
+from .mcpconfig import Registry, available_for
+from .mcpproxy import McpProxy, RunContext
 from . import prompt as prompts
 from .render import SlackRenderer
 from .store import MODE_PAUSED, MODE_SILENT, Store
@@ -51,6 +53,14 @@ class Daemon:
         self._app = AsyncApp(token=config.bot_token)
         self._approvals = ApprovalService(config, self._store, self._app.client)
 
+        # MCP upstreams and their credentials live on the host, in a 0600 file that is
+        # re-read when it changes. The proxy is the guest's only route to them, and the
+        # only place that knows which Slack user is asking.
+        self._mcp = Registry(config.mcp_config)
+        self._mcp_proxy = McpProxy(
+            config, self._store, self._mcp, self._run_context
+        )
+
         # Learned from auth.test at startup. Four behaviours now depend on it: the
         # duplicate-`message` drop for an in-thread mention, stripping our own
         # mention out of the text, the identity in the system prompt, and excluding
@@ -67,6 +77,18 @@ class Daemon:
         )
 
         self._register_handlers()
+
+    def _run_context(self, run_token: str) -> RunContext | None:
+        """Who is behind a run token. The guest never says; the host looks it up."""
+        run = self._approvals.run(run_token)
+        if run is None:
+            return None
+        return RunContext(
+            slack_user=run.requested_by,
+            channel_id=run.channel_id,
+            thread_ts=run.thread_ts,
+            session_id=run.session_id,
+        )
 
     # -- handlers -----------------------------------------------------------
 
@@ -351,6 +373,14 @@ class Daemon:
             self._store.get_setting, "agent_policy", self._config.agent_policy
         )
 
+        # Which MCP servers this person may use, decided here and now: the config file
+        # is re-read if it changed, so a server added a minute ago is live. Strict is
+        # set as soon as ANY server is configured — including for someone entitled to
+        # none, or "none for you" would fall back to the guest's own config.
+        mcp_servers, mcp_strict = await asyncio.to_thread(
+            self._mcp_servers_for, requested_by
+        )
+
         try:
             async for event in self._bridge.run(
                 prompt=prompt,
@@ -363,6 +393,8 @@ class Daemon:
                     self._bot_user_id,
                     self._config.extra_system_prompt,
                 ),
+                mcp_servers=mcp_servers,
+                mcp_strict=mcp_strict,
             ):
                 if (
                     event.get("type") == "system"
@@ -380,6 +412,23 @@ class Daemon:
         finally:
             self._approvals.unregister_run(run_token)
             await renderer.flush(force=True)
+
+    def _mcp_servers_for(self, slack_user: str) -> tuple[tuple[str, ...], bool]:
+        configured = self._mcp.servers()
+        if not configured:
+            # Nothing configured on the host: leave the guest's own MCP setup alone.
+            # This is what makes the migration safe to deploy before the host file
+            # exists — and once it does exist, strict takes over for good.
+            return (), False
+        available = available_for(
+            self._mcp, slack_user, self._store.mcp_disabled()
+        )
+        if len(available) != len(configured):
+            log.info(
+                "mcp: %s may use %d of %d server(s)",
+                slack_user or "unknown user", len(available), len(configured),
+            )
+        return tuple(sorted(available)), True
 
     async def _handle_command(
         self,
@@ -459,6 +508,7 @@ class Daemon:
 
     async def run(self) -> None:
         await self._approvals.start()
+        await self._mcp_proxy.start()
 
         try:
             identity = await self._app.client.auth_test()
@@ -491,6 +541,7 @@ class Daemon:
             log.info("shutting down")
             await handler.disconnect_async()
             await self._approvals.stop()
+            await self._mcp_proxy.stop()
             self._store.close()
 
 

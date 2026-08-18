@@ -67,6 +67,18 @@ class Config:
 
     extra_system_prompt: str = field(default="")
 
+    # MCP proxy, all optional: with no mcp_config there are no host-side servers and
+    # the guest's own MCP configuration is left exactly as it was. The credentials and
+    # policy live in that separate 0600 file rather than in .env — see
+    # slackagent/mcpconfig.py for why the mode is enforced.
+    mcp_config: Path | None = None
+    mcp_host: str = "127.0.0.1"
+    mcp_port: int = 9110
+    # A pool of its own: the MCP forward must not compete with the approval forward for
+    # a port, or one run could take the port another needs for its gate.
+    mcp_tunnel_port_low: int = 9201
+    mcp_tunnel_port_high: int = 9299
+
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
@@ -113,6 +125,15 @@ class Config:
             ).expanduser(),
             update_interval_s=float(os.environ.get("UPDATE_INTERVAL_S", "1.2")),
             extra_system_prompt=os.environ.get("EXTRA_SYSTEM_PROMPT", ""),
+            mcp_config=(
+                Path(os.path.expanduser(os.environ["MCP_CONFIG"]))
+                if os.environ.get("MCP_CONFIG", "").strip()
+                else None
+            ),
+            mcp_host=os.environ.get("MCP_HOST", "127.0.0.1"),
+            mcp_port=_int("MCP_PORT", 9110),
+            mcp_tunnel_port_low=_int("MCP_TUNNEL_PORT_LOW", 9201),
+            mcp_tunnel_port_high=_int("MCP_TUNNEL_PORT_HIGH", 9299),
         )
 
     @property

@@ -40,6 +40,9 @@ _STREAM_LINE_LIMIT = 32 * 1024 * 1024
 #     Host * block in /etc/ssh/ssh_config cannot change its behaviour.
 _NO_SSH_CONFIG = ("-F", "/dev/null")
 
+# Root-owned in the guest, so the agent cannot edit its own route to the host.
+MCP_RELAY = "/usr/local/bin/mcp-relay"
+
 
 class PortPool:
     """Hands out a distinct guest-side tunnel port per concurrent run.
@@ -74,6 +77,11 @@ class Bridge:
     def __init__(self, config: Config) -> None:
         self._config = config
         self._ports = PortPool(config.tunnel_port_low, config.tunnel_port_high)
+        # Separate pool for the MCP forward: sharing one would let a run take the port
+        # another run needs for approvals, which is the more important of the two.
+        self._mcp_ports = PortPool(
+            config.mcp_tunnel_port_low, config.mcp_tunnel_port_high
+        )
 
     async def run(
         self,
@@ -84,6 +92,8 @@ class Bridge:
         run_token: str,
         policy: str | None = None,
         system_append: str = "",
+        mcp_servers: tuple[str, ...] = (),
+        mcp_strict: bool = False,
     ) -> AsyncIterator[dict]:
         """Start a run and yield each stream-json event as it arrives.
 
@@ -93,6 +103,10 @@ class Bridge:
         """
         cfg = self._config
         port = await self._ports.acquire()
+        # No MCP servers for this run means no second forward at all. ssh runs with
+        # ExitOnForwardFailure, so an unused port that happens to be taken would
+        # otherwise be able to kill a run for a feature nobody is using.
+        mcp_port = await self._mcp_ports.acquire() if mcp_servers else None
         process: asyncio.subprocess.Process | None = None
         stderr_chunks: list[bytes] = []
 
@@ -124,6 +138,14 @@ class Bridge:
                 *(("-A",) if cfg.forward_agent else ("-o", "ForwardAgent=no")),
                 "-R",
                 f"127.0.0.1:{port}:{cfg.approval_host}:{cfg.approval_port}",
+                *(
+                    (
+                        "-R",
+                        f"127.0.0.1:{mcp_port}:{cfg.mcp_host}:{cfg.mcp_port}",
+                    )
+                    if mcp_port is not None
+                    else ()
+                ),
                 f"{cfg.vm_user}@{cfg.vm_host}",
             ]
 
@@ -142,6 +164,17 @@ class Bridge:
                     # --append-system-prompt. In the system prompt rather than the
                     # turn so it survives context compaction in a long thread.
                     "system_append": system_append,
+                    # The MCP servers this caller may use, already resolved on the
+                    # host. Every one of them points at the relay: the guest gets a
+                    # port and a run token, never a credential.
+                    "mcp_port": mcp_port,
+                    "mcp_config": _mcp_config(mcp_servers, mcp_port, mcp_strict),
+                    # Strict means the guest's own ~/.claude.json MCP servers are
+                    # ignored entirely. Set as soon as the host has any server
+                    # configured, INCLUDING for a caller who may use none of them —
+                    # otherwise "no servers for you" would silently fall back to
+                    # whatever the VM has lying around.
+                    "mcp_strict": mcp_strict,
                 }
             ).encode()
 
@@ -200,6 +233,8 @@ class Bridge:
                 with contextlib.suppress(ProcessLookupError):
                     await process.wait()
             await self._ports.release(port)
+            if mcp_port is not None:
+                await self._mcp_ports.release(mcp_port)
 
     async def probe(self) -> RunResult:
         """Check the SSH path without starting a Claude run.
@@ -234,6 +269,36 @@ class Bridge:
             exit_code=process.returncode or 0,
             stderr=stderr.decode(errors="replace").strip(),
         )
+
+
+def _mcp_config(
+    servers: tuple[str, ...], mcp_port: int | None, strict: bool = False
+) -> str:
+    """The --mcp-config document for one run, or "" for no MCP at all.
+
+    Every entry is the same relay with a different argument, so tool names stay
+    `mcp__<server>__<tool>` — Claude Code takes the prefix from the config key, and the
+    grants already in the database are written against those names.
+
+    An empty document is still worth sending when strict is set: paired with
+    --strict-mcp-config it is what says "this caller gets no MCP servers", rather than
+    leaving the CLI to fall back on the guest's own configuration.
+    """
+    if mcp_port is None:
+        return json.dumps({"mcpServers": {}}) if strict else ""
+    return json.dumps(
+        {
+            "mcpServers": {
+                name: {
+                    "type": "stdio",
+                    "command": MCP_RELAY,
+                    "args": [name],
+                    "env": {"AGENT_MCP_PORT": str(mcp_port)},
+                }
+                for name in servers
+            }
+        }
+    )
 
 
 async def _drain(stream: asyncio.StreamReader, into: list[bytes]) -> None:
