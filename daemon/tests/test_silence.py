@@ -1,8 +1,12 @@
 """The daemon's half of "don't reply when you weren't asked".
 
-test_render.py covers what the renderer does with the marker; this covers the
-wiring that decides a message needs judging at all: which turns are quiet, and
-what the agent is actually told about the message it was handed.
+Two ways a message goes unanswered, and this covers the daemon's side of both:
+
+  * the agent judges an unaddressed message was not for it (test_render.py covers
+    what the renderer then does with the marker; here it is the wiring that
+    decides a message needs judging at all, and what the agent is told);
+  * the operator paused the thread with |pause, which is not a judgement at all —
+    nothing is forwarded and nothing is posted until |resume.
 
 Run:  .venv/bin/python -m tests.test_silence
 """
@@ -95,6 +99,54 @@ async def main() -> int:
               bridge.prompts[-1][:80])
         check("the placeholder goes up immediately",
               posted and posted[0]["text"] == "_working…_", posted)
+
+        print("\n[4] |pause stops the thread outright; |resume lifts it")
+        client = daemon._app.client  # noqa: SLF001
+
+        async def command(text: str) -> str:
+            client.posted.clear()
+            handled = await daemon._handle_command(  # noqa: SLF001
+                "C1", "1.1", text, AUTHORIZED, True
+            )
+            check(f"{text!r} was handled locally", handled, text)
+            return client.posted[-1]["text"] if client.posted else ""
+
+        reply = await command("|pause")
+        check("|pause confirms and names the way out",
+              "Paused" in reply and "|resume" in reply, reply[:90])
+        check("the pause is recorded",
+              daemon._store.is_thread_paused("C1", "1.1"))  # noqa: SLF001
+
+        bridge, posted = await turn(daemon, "Yes.", is_mention=True)
+        check("a mention in a paused thread starts no run", bridge.prompts == [],
+              bridge.prompts)
+        check("and posts nothing at all", posted == [], posted)
+        bridge, posted = await turn(daemon, "Yes.", is_mention=False)
+        check("nor does an in-thread reply", bridge.prompts == [] and posted == [],
+              (bridge.prompts, posted))
+
+        reply = await command("|pause")
+        check("pausing twice says so", "Already paused" in reply, reply[:60])
+
+        # The one thing that must still work while paused, or there is no way out.
+        reply = await command("|resume")
+        check("|resume is answered while paused", "Answering here again" in reply,
+              reply[:80])
+        check("the pause is gone",
+              not daemon._store.is_thread_paused("C1", "1.1"))  # noqa: SLF001
+        reply = await command("|resume")
+        check("resuming an unpaused thread changes nothing",
+              "was not paused" in reply, reply[:60])
+
+        bridge, posted = await turn(daemon, "Back.", is_mention=True)
+        check("the thread answers again after |resume",
+              bridge.prompts and posted, (bridge.prompts, posted))
+
+        # A pause is per thread: another thread in the same channel is unaffected.
+        daemon._store.pause_thread("C1", "1.1", AUTHORIZED)  # noqa: SLF001
+        check("a different thread is not paused",
+              not daemon._store.is_thread_paused("C1", "9.9"))  # noqa: SLF001
+        daemon._store.resume_thread("C1", "1.1")  # noqa: SLF001
 
     print()
     if failures:
