@@ -26,6 +26,7 @@ from .config import Config, ConfigError
 from . import prompt as prompts
 from .render import SlackRenderer
 from .store import MODE_PAUSED, MODE_SILENT, Store
+from .transcript import catch_up
 from .vmctl import VmControl
 
 log = logging.getLogger("slackagent")
@@ -181,7 +182,10 @@ class Daemon:
         # Daemon commands are handled here and never reach Claude. The match must
         # be tight: these are ordinary words, and a message that merely begins with
         # one is far more likely to be a request than a command.
-        if await self._handle_command(channel, thread_ts, text, user or "", is_operator):
+        message_ts = event.get("ts") or thread_ts
+        if await self._handle_command(
+            channel, thread_ts, message_ts, text, user or "", is_operator
+        ):
             return
 
         # The thread's mode, checked AFTER commands and BEFORE anything that posts.
@@ -235,7 +239,8 @@ class Daemon:
         lock = self._thread_locks[(channel, thread_ts)]
         async with lock:
             await self._run_turn(
-                channel, thread_ts, text, user or "", addressed=is_mention
+                channel, thread_ts, text, user or "",
+                addressed=is_mention, message_ts=message_ts,
             )
 
     def _strip_self_mention(self, text: str) -> str:
@@ -264,6 +269,7 @@ class Daemon:
         requested_by: str = "",
         *,
         addressed: bool = True,
+        message_ts: str = "",
     ) -> None:
         session = await asyncio.to_thread(
             self._store.get_or_create_session, channel, thread_ts, str(uuid.uuid4())
@@ -279,10 +285,41 @@ class Daemon:
             update_interval_s=self._config.update_interval_s,
             quiet=not addressed,
         )
-        prompt = prompts.assemble(
-            text=prompt, speaker=requested_by, addressed=addressed
-        )
         await renderer.start()
+
+        # What the agent missed, if anything. Read and fetched inside the caller's
+        # per-thread lock, so two people mentioning at once cannot each quote the
+        # other's message; and after renderer.start(), so the placeholder is not
+        # waiting on a Slack round trip.
+        transcript = None
+        if addressed and message_ts:
+            since = await asyncio.to_thread(
+                self._store.last_forwarded_ts, channel, thread_ts
+            )
+            transcript = await catch_up(
+                self._app.client,
+                channel=channel,
+                thread_ts=thread_ts,
+                since_ts=since,
+                current_ts=message_ts,
+                bot_user_id=self._bot_user_id,
+                bot_id=self._bot_id,
+            )
+
+        # Marked BEFORE the run, not after. The fact being recorded is "this was
+        # forwarded", which is true the moment it is sent; advancing it afterwards
+        # would mean a crashed run replays the same transcript on every retry,
+        # growing each time. A run that dies loses those messages instead, which
+        # only costs someone repeating themselves.
+        if message_ts:
+            await asyncio.to_thread(
+                self._store.mark_forwarded, channel, thread_ts, message_ts
+            )
+
+        prompt = prompts.assemble(
+            text=prompt, speaker=requested_by, addressed=addressed,
+            transcript=transcript,
+        )
 
         if not await self._vm.is_running():
             await renderer.fail(
@@ -345,7 +382,13 @@ class Daemon:
             await renderer.flush(force=True)
 
     async def _handle_command(
-        self, channel: str, thread_ts: str, text: str, user: str, is_operator: bool
+        self,
+        channel: str,
+        thread_ts: str,
+        message_ts: str,
+        text: str,
+        user: str,
+        is_operator: bool,
     ) -> bool:
         """Handle a local command. Returns True if the message was one.
 
@@ -362,7 +405,7 @@ class Daemon:
         discovered rather than listed, using argparse so `|grants -h` works.
         """
         lines = text.strip().splitlines()
-        if not any(line.strip().startswith(COMMAND_PREFIX) for line in lines):
+        if not commands.is_local_command(text):
             return False
 
         # Past this point the message is consumed no matter what.
@@ -387,7 +430,7 @@ class Daemon:
             return True
 
         ctx = commands.Context(
-            channel=channel, thread_ts=thread_ts, user=user,
+            channel=channel, thread_ts=thread_ts, message_ts=message_ts, user=user,
             is_operator=is_operator, config=self._config, store=self._store,
             vm=self._vm, bridge=self._bridge, approvals=self._approvals,
             say=say,
