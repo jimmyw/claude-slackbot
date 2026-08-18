@@ -22,8 +22,8 @@ import tempfile
 from pathlib import Path
 
 from slackagent.config import Config
-from slackagent.mcpconfig import Registry
-from slackagent.mcpproxy import McpProxy, RunContext
+from slackagent.mcpconfig import Credential, Registry
+from slackagent.mcpproxy import McpProxy, OAuth, RunContext
 from slackagent.store import Store
 
 REPO = Path(__file__).resolve().parents[2]
@@ -327,6 +327,113 @@ async def test_runtime_policy() -> None:
             await relay.wait()
 
 
+class FakeTokenEndpoint:
+    """An authorisation server that rotates its refresh tokens, as most do."""
+
+    def __init__(self, *, rotate: bool = True, status: int = 200) -> None:
+        self.rotate = rotate
+        self.status = status
+        self.calls: list[dict] = []
+
+    def post(self, url: str, data: dict):  # noqa: ANN201  mimics aiohttp
+        endpoint = self
+
+        class _Response:
+            status = endpoint.status
+
+            async def json(self, content_type=None):  # noqa: ANN001, ARG002
+                endpoint.calls.append(dict(data))
+                if endpoint.status >= 400:
+                    return {"error": "invalid_grant"}
+                body = {"access_token": f"access-{len(endpoint.calls)}",
+                        "expires_in": 3600}
+                if endpoint.rotate:
+                    body["refresh_token"] = f"refresh-{len(endpoint.calls)}"
+                return body
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return _Response()
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_oauth() -> None:
+    print("\n[5] oauth tokens are minted and rotated on the host")
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        store = Store(tmp / "s.sqlite3")
+        endpoint = FakeTokenEndpoint()
+        credential = Credential(
+            oauth={"token_url": "https://auth.example/token", "client_id": "cid",
+                   "refresh_token": "bootstrap-refresh", "scope": "logs"},
+            owner=OPERATOR,
+        )
+        auth = OAuth(store, "esp-crash", credential, session=endpoint)
+
+        header = await auth.header()
+        check("the first call refreshes and returns a bearer token",
+              header == {"Authorization": "Bearer access-1"}, header)
+        check("it used the bootstrap refresh token from the config file",
+              endpoint.calls[0]["refresh_token"] == "bootstrap-refresh",
+              endpoint.calls[0])
+        check("and sent the client id and scope",
+              endpoint.calls[0]["client_id"] == "cid"
+              and endpoint.calls[0]["scope"] == "logs", endpoint.calls[0])
+
+        row = store.mcp_token("esp-crash", OPERATOR)
+        check("the grant is persisted, keyed to the person",
+              row["access_token"] == "access-1", dict(row))
+        check("the ROTATED refresh token is persisted — keeping the file's copy is "
+              "what silently bricks the credential after one refresh",
+              row["refresh_token"] == "refresh-1", dict(row))
+
+        await auth.header()
+        check("an unexpired token is reused rather than refreshed again",
+              len(endpoint.calls) == 1, endpoint.calls)
+
+        await auth.header(force=True)
+        check("force refreshes, which is what a 401 mid-session needs",
+              len(endpoint.calls) == 2, endpoint.calls)
+        check("and the second refresh used the rotated token, not the original",
+              endpoint.calls[1]["refresh_token"] == "refresh-1", endpoint.calls[1])
+
+        store.save_mcp_token("esp-crash", OPERATOR, access_token="stale",
+                             refresh_token="refresh-2", expires_at=int(__import__("time").time()) + 10)
+        await auth.header()
+        check("a token inside the expiry skew is refreshed early",
+              len(endpoint.calls) == 3, endpoint.calls)
+
+        print("\n[5b] a refusal from the authorisation server")
+        broken = OAuth(store, "esp-crash", credential,
+                       session=FakeTokenEndpoint(status=400))
+        raised = ""
+        try:
+            await broken.header(force=True)
+        except RuntimeError as exc:
+            raised = str(exc)
+        check("it raises something an operator can act on",
+              "invalid_grant" in raised and "esp-crash" in raised, raised)
+
+        nothing = OAuth(store, "other", Credential(oauth={"token_url": "u"}),
+                        session=FakeTokenEndpoint())
+        raised = ""
+        try:
+            await nothing.header()
+        except RuntimeError as exc:
+            raised = str(exc)
+        check("with no refresh token at all it says to re-authorise",
+              "re-authorise" in raised, raised)
+        check("a server with no oauth block does not claim to be configured",
+              not OAuth(store, "x", Credential()).configured)
+        store.close()
+
+
 async def main() -> int:
     check("the relay script is executable and root-installable",
           RELAY.exists() and bool(RELAY.stat().st_mode & stat.S_IXUSR), RELAY)
@@ -334,6 +441,7 @@ async def main() -> int:
     await test_refusals()
     await test_caps()
     await test_runtime_policy()
+    await test_oauth()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
