@@ -23,7 +23,8 @@ from . import commands
 from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalService
 from .bridge import Bridge
 from .config import Config, ConfigError
-from .render import SILENT_MARKER, SlackRenderer
+from . import prompt as prompts
+from .render import SlackRenderer
 from .store import MODE_PAUSED, MODE_SILENT, Store
 from .vmctl import VmControl
 
@@ -39,26 +40,6 @@ def _self_mention_re(bot_user_id: str) -> re.Pattern[str]:
 
 COMMAND_PREFIX = commands.COMMAND_PREFIX
 
-# Wrapped around a message that did not address the bot. Anyone may reply in a
-# thread the bot owns, and most of those replies are people talking to each other
-# — so the agent is asked to judge, and given a way to answer with nothing. The
-# renderer turns the marker into actual silence: no placeholder, no message, no
-# trace in the channel. The note is deliberately explicit that using tools also
-# breaks the silence, since a run that reads ten files and then says nothing has
-# still spent a minute of the thread's attention.
-_UNADDRESSED_NOTE = (
-    "[Daemon note, not from a person: the Slack message below was posted in a "
-    "thread you are part of, but nobody mentioned you — it may well be two people "
-    "talking to each other, or thinking out loud. Decide whether it is meant for "
-    "you.\n"
-    "If it is not meant for you, or it needs nothing from you, reply with exactly "
-    f"{SILENT_MARKER} and nothing else, and use no tools. Nothing is then posted "
-    "to Slack at all.\n"
-    "If it is meant for you, answer it normally and do not mention this note.]\n\n"
-    "{text}"
-)
-
-
 class Daemon:
     def __init__(self, config: Config) -> None:
         self._config = config
@@ -69,9 +50,14 @@ class Daemon:
         self._app = AsyncApp(token=config.bot_token)
         self._approvals = ApprovalService(config, self._store, self._app.client)
 
-        # Learned from auth.test at startup; used to drop the duplicate `message`
-        # event that accompanies an in-thread mention.
+        # Learned from auth.test at startup. Four behaviours now depend on it: the
+        # duplicate-`message` drop for an in-thread mention, stripping our own
+        # mention out of the text, the identity in the system prompt, and excluding
+        # our own messages from a catch-up transcript. Each degrades on its own when
+        # auth.test fails; none of them is fatal.
         self._bot_user_id: str | None = None
+        self._bot_handle: str = ""
+        self._bot_id: str | None = None
 
         # One lock per thread: two quick replies in the same thread must not
         # --resume the same session concurrently.
@@ -293,8 +279,9 @@ class Daemon:
             update_interval_s=self._config.update_interval_s,
             quiet=not addressed,
         )
-        if not addressed:
-            prompt = _UNADDRESSED_NOTE.format(text=prompt)
+        prompt = prompts.assemble(
+            text=prompt, speaker=requested_by, addressed=addressed
+        )
         await renderer.start()
 
         if not await self._vm.is_running():
@@ -334,6 +321,11 @@ class Daemon:
                 resume=not session.is_new,
                 run_token=run_token,
                 policy=policy,
+                system_append=prompts.system_append(
+                    self._bot_handle,
+                    self._bot_user_id,
+                    self._config.extra_system_prompt,
+                ),
             ):
                 if (
                     event.get("type") == "system"
@@ -428,6 +420,8 @@ class Daemon:
         try:
             identity = await self._app.client.auth_test()
             self._bot_user_id = identity.get("user_id")
+            self._bot_handle = identity.get("user") or ""
+            self._bot_id = identity.get("bot_id")
             log.info("authenticated as %s (%s)", identity.get("user"), self._bot_user_id)
         except Exception:
             # Not fatal: without it, an in-thread mention is handled twice. Warn

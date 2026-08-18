@@ -83,6 +83,7 @@ class Bridge:
         resume: bool,
         run_token: str,
         policy: str | None = None,
+        system_append: str = "",
     ) -> AsyncIterator[dict]:
         """Start a run and yield each stream-json event as it arrives.
 
@@ -137,6 +138,10 @@ class Bridge:
                     # Per run, not per process: |auth changes this and the next
                     # run picks it up without a restart.
                     "policy": policy or cfg.agent_policy,
+                    # Standing rules and the bot's own Slack identity, for
+                    # --append-system-prompt. In the system prompt rather than the
+                    # turn so it survives context compaction in a long thread.
+                    "system_append": system_append,
                 }
             ).encode()
 

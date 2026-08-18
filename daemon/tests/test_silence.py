@@ -46,12 +46,15 @@ class FakeBridge:
     def __init__(self, reply: str) -> None:
         self.reply = reply
         self.prompts: list[str] = []
+        self.system_appends: list[str] = []
 
     async def probe(self) -> FakeProbe:
         return FakeProbe()
 
-    async def run(self, *, prompt: str, session_id: str, **_kwargs):
+    async def run(self, *, prompt: str, session_id: str, system_append: str = "",
+                  **_kwargs):
         self.prompts.append(prompt)
+        self.system_appends.append(system_append)
         yield {"type": "system", "subtype": "init", "session_id": session_id}
         yield {
             "type": "assistant",
@@ -118,7 +121,9 @@ async def main() -> int:
 
         print("\n[3] a mention is never wrapped and never deferred")
         bridge, posted = await turn(daemon, "On it.", is_mention=True)
-        check("the prompt is verbatim", bridge.prompts[-1] == "shall we ship?",
+        check("the prompt is the message, labelled with who wrote it, and nothing "
+              "else — no unaddressed note",
+              bridge.prompts[-1] == f"<@{AUTHORIZED}>: shall we ship?",
               bridge.prompts[-1][:80])
         check("the placeholder goes up immediately",
               posted and posted[0]["text"] == "_working…_", posted)
