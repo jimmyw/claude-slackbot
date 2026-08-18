@@ -479,6 +479,41 @@ class McpProxy:
             await self._server.wait_closed()
             self._server = None
 
+    @property
+    def registry(self) -> Registry:
+        return self._registry
+
+    async def probe_tools(self, server: Server, slack_user: str) -> list[dict]:
+        """Ask an upstream what it offers, from the host.
+
+        Used by `|mcp tools`, which is how the operator discovers what to allow next:
+        the guest only ever sees the filtered list, so the unfiltered one has to be
+        fetched out here.
+        """
+        credential = server.credential_for(slack_user)
+        if credential is None:
+            raise RuntimeError(
+                f"{slack_user or 'this user'} has no credential for {server.name}"
+            )
+        upstream = self._upstream_factory(server, credential)
+        await upstream.start()
+        try:
+            await upstream.send({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "slack-claude-daemon", "version": "1"},
+                },
+            })
+            await asyncio.wait_for(upstream.receive(), timeout=20)
+            await upstream.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            await upstream.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+            reply = await asyncio.wait_for(upstream.receive(), timeout=20)
+            return list(((reply or {}).get("result") or {}).get("tools") or [])
+        finally:
+            await upstream.close()
+
     # -- per connection -------------------------------------------------------
 
     async def _handle(

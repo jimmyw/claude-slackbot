@@ -31,6 +31,9 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     # forced command ran — a healthy path, not a failure.
     reachable = "reachable" if probe.exit_code in {0, 64} else "unreachable"
     grants = ctx.store.list_grants()
+    registry = getattr(ctx.mcp, "registry", None)
+    mcp_servers = sorted(registry.servers()) if registry is not None else []
+    mcp_disabled = ctx.store.mcp_disabled() if mcp_servers else set()
     policy = ctx.store.get_setting("agent_policy", ctx.config.agent_policy)
     # Reported because a paused thread is silent by design, which is otherwise
     # indistinguishable from a broken one — and |status is where you look.
@@ -47,7 +50,15 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         + (" — :warning: approvals disabled" if policy == "open" else "")
         + f" (`{COMMAND_PREFIX}auth` to change)\n"
         f"Standing grants: {len(grants)} (`{COMMAND_PREFIX}grants` to list)\n"
-        f"This thread: {_thread_line(here)}"
+        + (
+            f"MCP: {len(mcp_servers) - len(mcp_disabled)} of {len(mcp_servers)} "
+            f"server(s) offered, credentials on the host "
+            f"(`{COMMAND_PREFIX}mcp`)\n"
+            if mcp_servers
+            else "MCP: none on the host, so the VM's own config is used "
+                 f"(`{COMMAND_PREFIX}mcp`)\n"
+        )
+        + f"This thread: {_thread_line(here)}"
         + (f"\nElsewhere: {_elsewhere_line(elsewhere)}" if elsewhere else "")
         + (
             "\n_I may also stay quiet on a message that did not mention me, when I "

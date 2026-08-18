@@ -97,6 +97,9 @@ class Context:
     bridge: Any
     approvals: Any
     say: Callable[[str], Awaitable[None]]
+    # The MCP proxy, or None when no host-side MCP is configured. |mcp uses it to ask
+    # an upstream what it offers, which the guest never gets to see unfiltered.
+    mcp: Any = None
 
 
 @dataclass(frozen=True)

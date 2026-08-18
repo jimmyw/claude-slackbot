@@ -11,9 +11,13 @@ their own.
 Two rules govern policy, and they are deliberately boring:
 
   * **Deny always wins.** Denies from every level are unioned; one match refuses.
-  * **The most specific allow level wins.** A user with any `allow` of their own uses
-    it *instead of* the server's, so a per-user list can narrow as well as widen.
-    Without that, a server-wide allow could never be tightened for one person.
+  * **The most specific CONFIGURED allow level wins.** A user with any `allow` of
+    their own in the file uses it *instead of* the server's, so a per-user list can
+    narrow as well as widen. Without that, a server-wide allow could never be
+    tightened for one person.
+  * **Runtime rules from `|mcp` are additive**, never a replacement. `|mcp allow x y`
+    means "y as well", so adding one tool cannot silently revoke the rest — which is
+    exactly what happened when runtime allows were treated as a per-user list.
 
 Anything not matched is denied. A tool the operator has not thought about is not a
 tool the agent may call.
@@ -138,10 +142,12 @@ def decide(
     if hit is not None:
         return Decision(False, f"denied by pattern {hit!r}")
 
-    # The most specific allow level wins, so a per-user list can be narrower than the
-    # server's rather than only wider.
-    user_allow = tuple(server.user_allow.get(slack_user, ())) + tuple(extra_allow)
-    allows = user_allow if user_allow else tuple(server.allow)
+    # The most specific CONFIGURED level wins, so a per-user list in the file can be
+    # narrower than the server's rather than only wider. Runtime patterns are then
+    # added to whichever of those applies: `|mcp allow` means "this as well", and a
+    # test caught it revoking everything else when it was treated as a per-user list.
+    configured = server.user_allow.get(slack_user) or server.allow
+    allows = tuple(configured) + tuple(extra_allow)
     hit = matches(allows, tool)
     if hit is not None:
         return Decision(True, f"allowed by pattern {hit!r}")
