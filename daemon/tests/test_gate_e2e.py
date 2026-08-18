@@ -30,7 +30,9 @@ from slackagent.store import Store
 
 REPO = Path(__file__).resolve().parents[2]
 AGENT_EXEC = REPO / "vm-files/usr/local/bin/agent-exec"
-HOOK = REPO / "vm-files/home/agent/.claude/hooks/approve.py"
+# Root-owned and outside /home/agent since f0b27da: the agent must not be able
+# to edit the gate that constrains it.
+HOOK = REPO / "vm-files/etc/claude-agent/approve.py"
 AUTHORIZED = "U_JIMMY"
 
 failures: list[str] = []
@@ -157,7 +159,7 @@ async def run_agent_exec(
 def write_settings(directory: Path) -> Path:
     """The guest settings.json, with the hook path rewritten for local running."""
     real = json.loads(
-        (REPO / "vm-files/home/agent/.claude/settings.json").read_text()
+        (REPO / "vm-files/etc/claude-agent/settings.json").read_text()
     )
     hooks = real["hooks"]["PreToolUse"][0]["hooks"][0]
     hooks["command"] = f"python3 {HOOK}"
