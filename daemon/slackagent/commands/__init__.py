@@ -31,6 +31,22 @@ from typing import Any
 COMMAND_PREFIX = "|"
 
 
+def is_local_command(text: str) -> bool:
+    """True when a message is an operator instruction rather than conversation.
+
+    One definition, used by two callers that must not drift: the dispatcher, which
+    never forwards such a message to Claude, and the catch-up transcript, which must
+    not quote back a command the agent was deliberately never shown.
+
+    ANY line starting with the prefix counts, not just the first — that is the rule
+    the dispatcher enforces, and a message with a `|` line buried in it is a mistyped
+    command, not prose.
+    """
+    return any(
+        line.strip().startswith(COMMAND_PREFIX) for line in text.strip().splitlines()
+    )
+
+
 class CommandError(Exception):
     """Bad input, reported to the operator rather than raised at the process."""
 
@@ -69,6 +85,10 @@ class Context:
 
     channel: str
     thread_ts: str
+    # The ts of the message that invoked the command. |resume needs it: lifting a
+    # pause has to move the catch-up watermark forward, or the next mention would
+    # forward the very messages the pause promised were never seen.
+    message_ts: str
     user: str
     is_operator: bool
     config: Any

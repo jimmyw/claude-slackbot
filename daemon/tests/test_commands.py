@@ -74,7 +74,8 @@ async def main() -> int:
 
         async def handled(text: str, operator: bool = True) -> bool:
             return await d._handle_command(  # noqa: SLF001
-                "C1", "1.1", text, AUTHORIZED if operator else GUEST, operator
+                "C1", "1.1", "9.9", text,
+                AUTHORIZED if operator else GUEST, operator,
             )
 
         print("\n[1] the registry discovers command modules")

@@ -66,6 +66,14 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         )
         since = f" {was}{who} since {when}.{dropped}"
 
+    if previous == MODE_PAUSED:
+        # |pause promised that nothing said in the thread reaches Claude, and
+        # |resume promised it was never seen. Without this the next mention would
+        # quote the whole paused window back — the daemon would be lying in three
+        # places at once. |silent deliberately does NOT do this: being told what you
+        # missed is the entire point of that mode.
+        ctx.store.mark_forwarded(ctx.channel, ctx.thread_ts, ctx.message_ts)
+
     # The two modes made different promises while they were on, so the sentence has
     # to branch: a pause swallowed those messages for good, mention-only did not.
     tail = (

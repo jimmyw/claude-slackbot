@@ -134,7 +134,7 @@ async def main() -> int:
         async def command(text: str) -> str:
             client.posted.clear()
             handled = await daemon._handle_command(  # noqa: SLF001
-                "C1", "1.1", text, AUTHORIZED, True
+                "C1", "1.1", "9.9", text, AUTHORIZED, True
             )
             check(f"{text!r} was handled locally", handled, text)
             return client.posted[-1]["text"] if client.posted else ""
