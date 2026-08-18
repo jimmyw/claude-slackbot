@@ -9,6 +9,7 @@ the "outbound only, no inbound" constraint actually hold on a home server.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import re
 import signal
@@ -23,12 +24,18 @@ from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalServi
 from .bridge import Bridge
 from .config import Config, ConfigError
 from .render import SILENT_MARKER, SlackRenderer
-from .store import MODE_PAUSED, Store
+from .store import MODE_PAUSED, MODE_SILENT, Store
 from .vmctl import VmControl
 
 log = logging.getLogger("slackagent")
 
 _MENTION = re.compile(r"<@[A-Z0-9]+>")
+
+
+@functools.lru_cache(maxsize=4)
+def _self_mention_re(bot_user_id: str) -> re.Pattern[str]:
+    """Our own mention, in both the plain and the `<@Uxxx|handle>` form."""
+    return re.compile(rf"<@{re.escape(bot_user_id)}(\|[^>]*)?>")
 
 COMMAND_PREFIX = commands.COMMAND_PREFIX
 
@@ -154,9 +161,17 @@ class Daemon:
 
         channel = event.get("channel")
         user = event.get("user")
-        text = _MENTION.sub("", event.get("text") or "").strip()
-        if not channel or not text:
+        text = self._strip_self_mention(event.get("text") or "")
+        if not channel:
             return
+        if not text:
+            # A message whose entire content was our own mention. Dropping it — which
+            # is what this did — silently discarded "@bot" and "@bot ?", the most
+            # natural way to wake a bot that has been silenced. Say what happened
+            # instead, and let the agent answer it.
+            if not is_mention:
+                return
+            text = "(You were tagged with no other text.)"
 
         # A new thread is rooted at the message that started it.
         thread_ts = event.get("thread_ts") or event.get("ts")
@@ -176,6 +191,28 @@ class Daemon:
                 return
 
         is_operator = user == self._config.authorized_user
+
+        # Daemon commands are handled here and never reach Claude. The match must
+        # be tight: these are ordinary words, and a message that merely begins with
+        # one is far more likely to be a request than a command.
+        if await self._handle_command(channel, thread_ts, text, user or "", is_operator):
+            return
+
+        # The thread's mode, checked AFTER commands and BEFORE anything that posts.
+        #
+        # After commands, because a muted thread must still accept |resume or there
+        # is no way out of it. Before the refusals below, because those post: a
+        # non-allowlisted guest writing in a paused thread used to get a public
+        # ":no_entry:" reply, so a paused thread was not actually silent. A mode that
+        # talks is not a mode.
+        mode = await asyncio.to_thread(self._store.thread_mode, channel, thread_ts)
+        if mode == MODE_PAUSED or (mode == MODE_SILENT and not is_mention):
+            await asyncio.to_thread(self._store.note_dropped, channel, thread_ts)
+            log.info(
+                "thread mode=%s; not forwarding (channel=%s thread=%s user=%s)",
+                mode, channel, thread_ts, user,
+            )
+            return
 
         # Anyone in a channel the bot was invited to may talk: the invite is the
         # grant. A DM is not such a channel — any workspace member can open one —
@@ -209,30 +246,27 @@ class Daemon:
             log.warning("refused message from %s (not on ALLOWED_USERS)", user)
             return
 
-        # Daemon commands are handled here and never reach Claude. The match must
-        # be tight: these are ordinary words, and a message that merely begins with
-        # one is far more likely to be a request than a command.
-        if await self._handle_command(channel, thread_ts, text, user or "", is_operator):
-            return
-
-        # |pause is checked here, after commands: a paused thread must still accept
-        # |resume, or there would be no way out of it. Everything else in the thread
-        # is dropped — mentions included, since a pause the bot argues with is not a
-        # pause. Nothing is posted; the log line is the only trace.
-        mode = await asyncio.to_thread(self._store.thread_mode, channel, thread_ts)
-        if mode == MODE_PAUSED:
-            await asyncio.to_thread(self._store.note_dropped, channel, thread_ts)
-            log.info(
-                "thread is paused; not forwarding (channel=%s thread=%s user=%s)",
-                channel, thread_ts, user,
-            )
-            return
-
         lock = self._thread_locks[(channel, thread_ts)]
         async with lock:
             await self._run_turn(
                 channel, thread_ts, text, user or "", addressed=is_mention
             )
+
+    def _strip_self_mention(self, text: str) -> str:
+        """Remove our own mention token, and nothing else.
+
+        This used to strip EVERY `<@Uxxxx>`, so "ask <@U_BOB> about the meter"
+        reached the agent as "ask about the meter" — the one piece of information
+        that says who is being talked to, deleted. Other people's mentions now
+        survive into the prompt.
+
+        Falls back to the old behaviour when auth.test never answered: without our
+        own id we cannot tell our mention from anyone else's, and leaving our own in
+        is the more confusing of the two failures.
+        """
+        if self._bot_user_id is None:
+            return _MENTION.sub("", text).strip()
+        return _self_mention_re(self._bot_user_id).sub("", text).strip()
 
     # -- the turn -----------------------------------------------------------
 
