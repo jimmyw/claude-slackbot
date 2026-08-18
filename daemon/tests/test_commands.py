@@ -95,7 +95,8 @@ async def main() -> int:
         for text in ["|help", "|commands", "|?", "|", "|status", "|grants",
                      "|grant", "  |status  ", "|STATUS", "|Grants",
                      "|pause", "|resume", "|mute", "|unmute",
-                     "|silent", "|quiet", "|mentions", "|SILENT"]:
+                     "|silent", "|quiet", "|mentions", "|SILENT",
+                     "|mcp", "|mcp calls", "|tools"]:
             check(f"{text!r} is a command", await handled(text), text)
 
         print("\n[3] |revoke argument validation via argparse")
@@ -154,6 +155,7 @@ async def main() -> int:
             "pause the CI job while I look at the logs",
             "resume from where we left off", "pause", "resume",
             "be quiet for a bit", "silent", "quiet down the CI logs",
+            "mcp is broken again", "what tools do you have?", "mcp", "tools",
             "what does the | character do in bash?",
         ]:
             check(f"{text!r} goes to Claude", not await handled(text), text)

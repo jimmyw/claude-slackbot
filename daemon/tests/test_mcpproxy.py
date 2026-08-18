@@ -434,6 +434,91 @@ async def test_oauth() -> None:
         store.close()
 
 
+async def test_command() -> None:
+    """|mcp against a real registry and a real upstream."""
+    print("\n[6] |mcp")
+    from slackagent import commands
+    from slackagent.commands import mcp as mcp_command
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        async with Harness(tmp, document(tmp / "cmd"), name="cmd") as h:
+            said: list[str] = []
+
+            async def say(message: str) -> None:
+                said.append(message)
+
+            def context() -> commands.Context:
+                return commands.Context(
+                    channel="C1", thread_ts="1.1", message_ts="1.2", user=OPERATOR,
+                    is_operator=True, config=None, store=h.store, vm=None,
+                    bridge=None, approvals=None, say=say, mcp=h.proxy,
+                )
+
+            async def run(*argv: str) -> str:
+                said.clear()
+                parsed = mcp_command.build_parser().parse_args(list(argv))
+                await mcp_command.run(context(), parsed)
+                return said[-1] if said else ""
+
+            out = await run()
+            check("|mcp lists the servers and where the credentials are",
+                  "syslog" in out and "varys" in out
+                  and "credentials live on the host" in out, out[:160])
+            check("it says which tools are allowed", "`query_logs`" in out, out[:400])
+            check("and never prints a credential",
+                  "shared-t0ken" not in out and "personal-t0ken" not in out, out)
+
+            out = await run("tools", "syslog")
+            check("|mcp tools asks the upstream live, and marks what is blocked",
+                  "query_logs" in out and "pulse_reboot" in out
+                  and "blocked" in out, out[:400])
+            check("it suggests the command that would allow one",
+                  "|mcp allow syslog pulse_reboot" in out, out[-200:])
+
+            out = await run("allow", "syslog", "pulse_*")
+            check("|mcp allow writes a runtime rule", "now *allowed*" in out, out)
+            check("which the policy then honours",
+                  mcp_command.decide(
+                      h.registry.get("syslog"), OPERATOR, "pulse_reboot",
+                      extra_allow=("pulse_*",)).allowed)
+
+            out = await run("tools", "syslog")
+            check("and the tool moves to allowed", "blocked" not in out, out[:300])
+
+            rule_id = h.store.mcp_policy("syslog")[0]["id"]
+            out = await run("forget", str(rule_id))
+            check("|mcp forget drops it", "Dropped rule" in out, out)
+
+            out = await run("disable", "syslog")
+            check("|mcp disable stops it being offered",
+                  "no longer offered" in out and h.store.mcp_disabled() == {"syslog"},
+                  out)
+            out = await run("enable", "syslog")
+            check("|mcp enable brings it back",
+                  "offered again" in out and h.store.mcp_disabled() == set(), out)
+
+            h.store.record_mcp_call(
+                slack_user=OPERATOR, channel_id="C1", thread_ts="1.1",
+                session_id="s", server="syslog", tool="query_logs",
+                decision="allowed",
+            )
+            out = await run("calls")
+            check("|mcp calls shows the audit trail, naming the person",
+                  "syslog.query_logs" in out and OPERATOR in out, out)
+
+            errors: list[str] = []
+            for argv in (("tools", "nosuch"), ("allow", "syslog"), ("forget", "x")):
+                try:
+                    await run(*argv)
+                except commands.CommandError as exc:
+                    errors.append(str(exc))
+            check("bad input is reported, not raised at the daemon",
+                  len(errors) == 3, errors)
+            check("an unknown server lists the real ones",
+                  "syslog" in errors[0], errors[0])
+
+
 async def main() -> int:
     check("the relay script is executable and root-installable",
           RELAY.exists() and bool(RELAY.stat().st_mode & stat.S_IXUSR), RELAY)
@@ -442,6 +527,7 @@ async def main() -> int:
     await test_caps()
     await test_runtime_policy()
     await test_oauth()
+    await test_command()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")

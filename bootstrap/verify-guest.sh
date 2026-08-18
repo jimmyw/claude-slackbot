@@ -129,6 +129,40 @@ set -e
 [[ "$code" -eq 64 ]] && report "forced command runs (empty job -> 64)" ok \
                      || report "forced command exit code" no "$code"
 
+echo "[7] no MCP credential lives in the VM"
+# The whole point of the host-side proxy: an MCP server configured inside the guest
+# carries its own credential -- a header, an env token, or a full OAuth grant with a
+# refresh token -- and that sits outside both the VM boundary and the approval gate.
+# The daemon passes --strict-mcp-config so a leftover would be ignored, but ignored is
+# not gone: it can still be read by anything with code execution in here.
+mcp_servers=$("${ADMIN_SSH[@]}" \
+    'sudo grep -rl "\"mcpServers\"" /home/agent --include="*.json" 2>/dev/null | head -5' \
+    </dev/null || true)
+if [[ -z "$mcp_servers" ]]; then
+    report "no mcpServers in the guest" ok
+else
+    report "no mcpServers in the guest" no "found in: $(tr '\n' ' ' <<<"$mcp_servers")"
+fi
+
+mcp_oauth=$("${ADMIN_SSH[@]}" \
+    'sudo grep -rl "mcpOAuth" /home/agent 2>/dev/null | head -5' \
+    </dev/null || true)
+if [[ -z "$mcp_oauth" ]]; then
+    report "no MCP OAuth grant in the guest" ok
+else
+    report "no MCP OAuth grant in the guest" no "found in: $(tr '\n' ' ' <<<"$mcp_oauth")"
+fi
+
+# The relay is the guest's only route out to MCP, so it must be root-owned for the same
+# reason the gate is: the agent must not be able to point its own traffic elsewhere.
+relay=$("${ADMIN_SSH[@]}" 'stat -c "%U:%G %a" /usr/local/bin/mcp-relay 2>/dev/null' \
+    </dev/null || true)
+if [[ "$relay" == "root:root 755" ]]; then
+    report "mcp-relay is root-owned" ok "$relay"
+else
+    report "mcp-relay is root-owned" no "${relay:-missing}"
+fi
+
 echo
 echo "passed=$pass failed=$fail"
 if (( fail > 0 )); then

@@ -482,7 +482,7 @@ class Daemon:
             channel=channel, thread_ts=thread_ts, message_ts=message_ts, user=user,
             is_operator=is_operator, config=self._config, store=self._store,
             vm=self._vm, bridge=self._bridge, approvals=self._approvals,
-            say=say,
+            say=say, mcp=self._mcp_proxy,
         )
         try:
             await commands.dispatch(ctx, stripped)

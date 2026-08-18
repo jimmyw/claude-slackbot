@@ -162,6 +162,14 @@ def test_policy() -> None:
     print("\n[3b] runtime patterns from |mcp")
     check("an extra allow widens one caller",
           decide(syslog, GUEST, "tail_file", extra_allow=("tail_*",)).allowed)
+    # This is the bug the |mcp test caught: a runtime allow used to land in the
+    # per-user slot, which REPLACES the file's list, so allowing one tool silently
+    # revoked every other tool on the server.
+    check("and does not revoke what the file already allowed",
+          decide(syslog, GUEST, "query_logs", extra_allow=("tail_*",)).allowed)
+    check("nor does it override a per-user narrowing in the file",
+          decide(varys, OPERATOR, "pulse_lookup_qr",
+                 extra_allow=("something_else",)).allowed)
     check("an extra deny wins over everything",
           not decide(syslog, GUEST, "query_logs", extra_deny=("query_*",)).allowed)
 
