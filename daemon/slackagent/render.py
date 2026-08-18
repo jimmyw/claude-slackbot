@@ -4,6 +4,11 @@ Posts a placeholder as soon as a run starts, then edits it as events arrive.
 Edits are throttled because Slack allows roughly one message write per second per
 channel, and a chatty run emits events far faster than that.
 
+In `quiet` mode nothing is posted until the agent actually says something, and a
+run whose whole answer is the no-reply marker posts nothing at all — see
+SILENT_MARKER. That is how a message that was not addressed to the bot can end in
+real silence rather than in "I think this was not for me".
+
 Event types seen in practice from `claude -p --output-format stream-json
 --verbose` (2.1.231): system/init, rate_limit_event, assistant, user, result.
 Unknown types are ignored rather than treated as errors — the stream is free to
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -23,6 +29,14 @@ log = logging.getLogger(__name__)
 # Slack rejects a section block whose text exceeds 3000 characters.
 BLOCK_LIMIT = 2900
 
+# What the agent says when it judges a message was not meant for it. The guest
+# CLAUDE.md tells it to answer with exactly this and nothing else; the daemon then
+# posts nothing at all, so an unrelated conversation in a thread the bot happens
+# to own is not interrupted. Matched loosely because the model will not always
+# reproduce the punctuation exactly.
+SILENT_MARKER = "[[no-reply]]"
+_MARKER_RE = re.compile(r"\[\[\s*no[-_ ]?reply\s*\]\]", re.IGNORECASE)
+
 
 class SlackRenderer:
     def __init__(
@@ -32,11 +46,17 @@ class SlackRenderer:
         thread_ts: str,
         *,
         update_interval_s: float = 1.2,
+        quiet: bool = False,
     ) -> None:
         self._slack = slack_client
         self._channel = channel
         self._thread_ts = thread_ts
         self._interval = update_interval_s
+        # Quiet mode: post nothing until there is something to say. Used when the
+        # message did not address the bot, because the "working…" placeholder is
+        # itself a reply — and the whole point is that an unaddressed message may
+        # get no reply at all.
+        self._quiet = quiet
 
         self._message_ts: str | None = None
         self._text_parts: list[str] = []
@@ -47,6 +67,8 @@ class SlackRenderer:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
+        if self._quiet:
+            return
         posted = await self._slack.chat_postMessage(
             channel=self._channel,
             thread_ts=self._thread_ts,
@@ -100,23 +122,64 @@ class SlackRenderer:
 
     async def flush(self, *, force: bool = False) -> None:
         async with self._lock:
-            if not self._dirty or self._message_ts is None:
+            if not self._dirty:
                 return
             now = time.monotonic()
             if not force and now - self._last_update < self._interval:
                 return
 
+            if self._staying_silent():
+                await self._retract()
+                return
+
             try:
-                await self._slack.chat_update(
-                    channel=self._channel,
-                    ts=self._message_ts,
-                    text=self._plain_text(),
-                    blocks=self._blocks(),
-                )
+                if self._message_ts is None:
+                    # Nothing posted yet (quiet mode). Wait for actual prose:
+                    # tool activity alone must not break the silence, because the
+                    # agent may yet decide the message was not for it.
+                    if not self._body():
+                        return
+                    posted = await self._slack.chat_postMessage(
+                        channel=self._channel,
+                        thread_ts=self._thread_ts,
+                        text=self._plain_text(),
+                        blocks=self._blocks(),
+                    )
+                    self._message_ts = posted["ts"]
+                else:
+                    await self._slack.chat_update(
+                        channel=self._channel,
+                        ts=self._message_ts,
+                        text=self._plain_text(),
+                        blocks=self._blocks(),
+                    )
                 self._last_update = now
                 self._dirty = False
             except Exception:
                 log.exception("could not update the Slack message")
+
+    def _staying_silent(self) -> bool:
+        """True when the agent's whole answer is the no-reply marker."""
+        raw = "".join(self._text_parts)
+        return bool(_MARKER_RE.search(raw)) and not _MARKER_RE.sub("", raw).strip()
+
+    async def _retract(self) -> None:
+        """Say nothing — and remove the placeholder if one was already posted."""
+        self._dirty = False
+        log.info(
+            "staying silent: the agent judged the message was not addressed to it "
+            "(channel=%s thread=%s)",
+            self._channel, self._thread_ts,
+        )
+        if self._message_ts is None:
+            return
+        try:
+            await self._slack.chat_delete(
+                channel=self._channel, ts=self._message_ts
+            )
+            self._message_ts = None
+        except Exception:
+            log.exception("could not delete the placeholder message")
 
     async def fail(self, message: str) -> None:
         self._text_parts.append(f"\n:warning: {message}")
@@ -125,17 +188,25 @@ class SlackRenderer:
 
     # -- rendering ----------------------------------------------------------
 
+    def _body(self) -> str:
+        """The answer text, with any no-reply marker removed.
+
+        A marker mixed in with real prose is a slip, not a decision to stay quiet:
+        the prose is the answer, so it is posted and the marker dropped.
+        """
+        return _MARKER_RE.sub("", "".join(self._text_parts)).strip()
+
     def _plain_text(self) -> str:
         # The fallback field is what notifications and unfurl previews show, so it
         # is converted too rather than left as raw Markdown.
-        text = to_mrkdwn("".join(self._text_parts).strip()) or "_working…_"
+        text = to_mrkdwn(self._body()) or "_working…_"
         return text[:2900]
 
     def _blocks(self) -> list[dict]:
         blocks: list[dict] = []
         # Claude writes GitHub Markdown; Slack renders mrkdwn. Without this the
         # message arrives showing literal ##, ** and [text](url).
-        body = to_mrkdwn("".join(self._text_parts).strip())
+        body = to_mrkdwn(self._body())
 
         if self._activity:
             recent = self._activity[-6:]

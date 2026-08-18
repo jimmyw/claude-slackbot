@@ -177,6 +177,15 @@ writes the mapping before the CLI starts, so the mapping is durable even if the
 first run dies. One `asyncio.Lock` per thread keeps two fast replies from
 resuming the same session concurrently.
 
+**It stays quiet when it wasn't asked.** Anyone can reply in a thread the bot
+owns, and most of those replies are people talking to each other. Those messages
+are handed to the agent with a note saying nobody mentioned it; if it decides the
+message wasn't for it, it answers with `[[no-reply]]` and the daemon posts nothing
+at all — no message, no "working…", no trace. Nothing is deferred for a mention or
+a DM: those are unambiguously for the bot, so it answers and shows its working as
+before. Silence is logged (`staying silent: …`) so it stays diagnosable, and
+transport failures are still posted either way.
+
 **Permissive by default.** Most work runs without interrupting you:
 
 | | asks? |

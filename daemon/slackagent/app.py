@@ -22,7 +22,7 @@ from . import commands
 from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalService
 from .bridge import Bridge
 from .config import Config, ConfigError
-from .render import SlackRenderer
+from .render import SILENT_MARKER, SlackRenderer
 from .store import Store
 from .vmctl import VmControl
 
@@ -31,6 +31,25 @@ log = logging.getLogger("slackagent")
 _MENTION = re.compile(r"<@[A-Z0-9]+>")
 
 COMMAND_PREFIX = commands.COMMAND_PREFIX
+
+# Wrapped around a message that did not address the bot. Anyone may reply in a
+# thread the bot owns, and most of those replies are people talking to each other
+# — so the agent is asked to judge, and given a way to answer with nothing. The
+# renderer turns the marker into actual silence: no placeholder, no message, no
+# trace in the channel. The note is deliberately explicit that using tools also
+# breaks the silence, since a run that reads ten files and then says nothing has
+# still spent a minute of the thread's attention.
+_UNADDRESSED_NOTE = (
+    "[Daemon note, not from a person: the Slack message below was posted in a "
+    "thread you are part of, but nobody mentioned you — it may well be two people "
+    "talking to each other, or thinking out loud. Decide whether it is meant for "
+    "you.\n"
+    "If it is not meant for you, or it needs nothing from you, reply with exactly "
+    f"{SILENT_MARKER} and nothing else, and use no tools. Nothing is then posted "
+    "to Slack at all.\n"
+    "If it is meant for you, answer it normally and do not mention this note.]\n\n"
+    "{text}"
+)
 
 
 class Daemon:
@@ -198,23 +217,37 @@ class Daemon:
 
         lock = self._thread_locks[(channel, thread_ts)]
         async with lock:
-            await self._run_turn(channel, thread_ts, text, user or "")
+            await self._run_turn(
+                channel, thread_ts, text, user or "", addressed=is_mention
+            )
 
     # -- the turn -----------------------------------------------------------
 
     async def _run_turn(
-        self, channel: str, thread_ts: str, prompt: str, requested_by: str = ""
+        self,
+        channel: str,
+        thread_ts: str,
+        prompt: str,
+        requested_by: str = "",
+        *,
+        addressed: bool = True,
     ) -> None:
         session = await asyncio.to_thread(
             self._store.get_or_create_session, channel, thread_ts, str(uuid.uuid4())
         )
 
+        # A mention or a DM is unambiguously for the bot, so it answers and shows
+        # its working. Anything else it has to judge for itself, and until it has,
+        # nothing is posted.
         renderer = SlackRenderer(
             self._app.client,
             channel,
             thread_ts,
             update_interval_s=self._config.update_interval_s,
+            quiet=not addressed,
         )
+        if not addressed:
+            prompt = _UNADDRESSED_NOTE.format(text=prompt)
         await renderer.start()
 
         if not await self._vm.is_running():
