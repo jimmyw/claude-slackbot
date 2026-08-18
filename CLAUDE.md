@@ -173,6 +173,33 @@ One module per command in `slackagent/commands/`, discovered with
   renders an endless code block followed by prose full of backticks. `_chunk`
   balances fences across chunk boundaries.
 
+## Silence
+
+- **An unaddressed message may get no reply at all.** Anyone can post in a thread
+  the bot owns, and most of those posts are people talking to each other. The
+  daemon wraps such a message in `_UNADDRESSED_NOTE` (`app.py`) and the guest
+  `CLAUDE.md` tells the agent to answer with exactly `[[no-reply]]` when the
+  message was not for it. `render.SILENT_MARKER` then suppresses the whole
+  message.
+- **The placeholder is the hard part.** `SlackRenderer.start()` used to post
+  "_working…_" before the run began, which is already a reply — so silence is
+  impossible unless posting is deferred. `quiet=True` (set for every non-mention,
+  non-DM turn) posts nothing until there is prose to post, and the first post
+  carries the answer rather than a placeholder. A mention or DM keeps the
+  placeholder, and retracts it with `chat_delete` if the marker arrives anyway.
+- **Tool activity does not break the silence.** A 🔧 line alone would be a reply
+  in a thread the agent then declines to answer, so in quiet mode only body text
+  triggers the first post. Errors do post, in both modes: a silent broken run is
+  indistinguishable from a working one that had nothing to say.
+- **The marker mixed with prose is ignored and the prose posted.** Treating a
+  partial marker as silence would swallow real answers; the marker is stripped
+  from the text either way, so it can never reach Slack.
+- The matching regex is deliberately loose (`[[NO-REPLY]]`, `[[ no_reply ]]`,
+  `[[no reply]]`), because the model will not always reproduce the punctuation.
+- **This still costs a turn.** The judgement happens inside Claude Code, so an
+  unrelated conversation in an owned thread still spends a (small, cached) run per
+  message. A daemon-side heuristic would be cheaper and much worse at knowing.
+
 ## Slack interaction gotchas
 
 - **`respond()` replaces the original message by default.** A reply to a button's
