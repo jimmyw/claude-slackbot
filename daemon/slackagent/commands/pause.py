@@ -3,12 +3,12 @@ from __future__ import annotations
 
 import argparse
 
-from ..store import MODE_PAUSED
+from ..store import MODE_PAUSED, MODE_SILENT
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "pause"
 ALIASES = ("mute",)
-SUMMARY = "stop answering in this thread until |resume"
+SUMMARY = "stop answering in this thread entirely"
 
 _DESCRIPTION = f"""\
 Pause the agent in the thread you type this in.
@@ -24,6 +24,9 @@ intact.
 
 Approvals already on screen are not affected — a run in flight keeps going, and
 its buttons still work. Pause stops new messages starting new turns.
+
+If you want it to stay reachable, `|silent` answers when tagged and ignores
+everything else. Pause is the stronger of the two: a tag does not wake it.
 """
 
 
@@ -43,6 +46,13 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         await ctx.say(
             f"Already paused here. `{COMMAND_PREFIX}resume` to start answering "
             "again."
+        )
+        return
+
+    if previous == MODE_SILENT:
+        await ctx.say(
+            ":no_bell: Fully muted now — this thread was mention-only, so tagging me "
+            f"used to work and no longer does. `{COMMAND_PREFIX}resume` to lift it."
         )
         return
 

@@ -43,15 +43,15 @@ class FakeClient:
         return {"ok": True}
 
     async def auth_test(self):
-        return {"user": "bot", "user_id": "U_BOT"}
+        return {"user": "bot", "user_id": "U_BOT", "bot_id": "B_BOT"}
 
 
-def make_daemon(tmp: Path) -> Daemon:
+def make_daemon(tmp: Path, allowed_users: frozenset[str] = frozenset()) -> Daemon:
     key = tmp / "key"
     key.write_text("x")
     config = Config(
         bot_token="xoxb-real", app_token="xapp-real",
-        authorized_user=AUTHORIZED, allowed_users=frozenset(),
+        authorized_user=AUTHORIZED, allowed_users=allowed_users,
         vm_host="10.0.0.1", vm_user="agent", vm_ssh_key=key,
         vm_domain="agent-vm", vm_workdir="/home/agent/work",
         libvirt_uri="qemu:///system", forward_agent=False,
@@ -93,7 +93,8 @@ async def main() -> int:
         print("\n[2] | commands are handled here, never sent to Claude")
         for text in ["|help", "|commands", "|?", "|", "|status", "|grants",
                      "|grant", "  |status  ", "|STATUS", "|Grants",
-                     "|pause", "|resume", "|mute", "|unmute"]:
+                     "|pause", "|resume", "|mute", "|unmute",
+                     "|silent", "|quiet", "|mentions", "|SILENT"]:
             check(f"{text!r} is a command", await handled(text), text)
 
         print("\n[3] |revoke argument validation via argparse")
@@ -151,6 +152,7 @@ async def main() -> int:
             "revoke 3", "status", "grants", "help",
             "pause the CI job while I look at the logs",
             "resume from where we left off", "pause", "resume",
+            "be quiet for a bit", "silent", "quiet down the CI logs",
             "what does the | character do in bash?",
         ]:
             check(f"{text!r} goes to Claude", not await handled(text), text)

@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 
-from ..store import MODE_PAUSED
+from ..store import MODE_PAUSED, MODE_SILENT
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "status"
@@ -33,10 +34,11 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     policy = ctx.store.get_setting("agent_policy", ctx.config.agent_policy)
     # Reported because a paused thread is silent by design, which is otherwise
     # indistinguishable from a broken one — and |status is where you look.
-    here = ctx.store.thread_mode(ctx.channel, ctx.thread_ts) == MODE_PAUSED
-    paused_elsewhere = len(ctx.store.list_thread_modes(MODE_PAUSED)) - (
-        1 if here else 0
-    )
+    here = ctx.store.thread_mode_entry(ctx.channel, ctx.thread_ts)
+    elsewhere = [
+        m for m in ctx.store.list_thread_modes()
+        if (m.channel_id, m.thread_ts) != (ctx.channel, ctx.thread_ts)
+    ]
 
     await ctx.say(
         f"VM `{ctx.config.vm_domain}`: {state}{f' at {ip}' if ip else ''}\n"
@@ -45,16 +47,52 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         + (" — :warning: approvals disabled" if policy == "open" else "")
         + f" (`{COMMAND_PREFIX}auth` to change)\n"
         f"Standing grants: {len(grants)} (`{COMMAND_PREFIX}grants` to list)\n"
+        f"This thread: {_thread_line(here)}"
+        + (f"\nElsewhere: {_elsewhere_line(elsewhere)}" if elsewhere else "")
         + (
-            ":large_orange_circle: This thread is *paused* — nothing here reaches "
-            f"Claude (`{COMMAND_PREFIX}resume` to lift it)"
-            if here
-            else f"This thread: answering (`{COMMAND_PREFIX}pause` to mute it)"
-        )
-        + (
-            f"\nPaused elsewhere: {paused_elsewhere} thread"
-            f"{'s' if paused_elsewhere != 1 else ''}"
-            if paused_elsewhere > 0
+            "\n_I may also stay quiet on a message that did not mention me, when I "
+            "judge it was not for me. That is logged, not shown._"
+            if here is None
             else ""
         )
     )
+
+
+def _thread_line(entry) -> str:  # noqa: ANN001
+    """One line naming which kind of quiet is in force.
+
+    Three kinds now, not two: paused, mention-only, and the agent's own judgement on
+    an unaddressed message. All three look identical in Slack — nothing happens — so
+    this is the only place they can be told apart.
+    """
+    if entry is None:
+        return (
+            f"answering normally (`{COMMAND_PREFIX}silent` for mentions only, "
+            f"`{COMMAND_PREFIX}pause` to mute)"
+        )
+    when = datetime.datetime.fromtimestamp(entry.set_at).strftime("%Y-%m-%d %H:%M")
+    who = f" by <@{entry.set_by}>" if entry.set_by else ""
+    dropped = (
+        f", {entry.dropped} message{'s' if entry.dropped != 1 else ''} not forwarded"
+        if entry.dropped else ""
+    )
+    label = (
+        ":speech_balloon: *mention-only* — I answer when tagged"
+        if entry.mode == MODE_SILENT
+        else ":large_orange_circle: *paused* — nothing here reaches Claude"
+    )
+    return (
+        f"{label} (set{who} at {when}{dropped}; "
+        f"`{COMMAND_PREFIX}resume` to lift)"
+    )
+
+
+def _elsewhere_line(entries: list) -> str:
+    silent = sum(1 for m in entries if m.mode == MODE_SILENT)
+    paused = sum(1 for m in entries if m.mode == MODE_PAUSED)
+    bits = []
+    if silent:
+        bits.append(f"{silent} mention-only")
+    if paused:
+        bits.append(f"{paused} paused")
+    return ", ".join(bits) + " (a mode only covers the thread it was set in)"
