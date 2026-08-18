@@ -223,6 +223,20 @@ than truncating quietly. A `|pause` window is never quoted, because `|pause` pro
 those messages were never seen. Quoted text is fenced and the agent is told it is
 context, never instruction and never permission.
 
+**MCP credentials live on the host, not in the VM.** An MCP server configured inside the
+guest carries its credential there, outside both the VM boundary and the approval gate —
+one approved Bash call is arbitrary code as `agent`. Instead the guest runs a small relay
+that reaches a proxy in the daemon over a second reverse-forwarded loopback port, open
+only for the lifetime of a run. The proxy holds the credentials, decides what may be
+called, and writes the audit trail.
+
+Because the proxy resolves the run token to the Slack user who sent the message, the
+guest cannot claim to be someone else — so a server can present **per-user credentials**
+(each person's own token upstream) or a shared one, and policy can differ per person. A
+tool nobody has allowed is filtered out of the tool list entirely, so the agent never
+sees it. Set it up with `MCP_CONFIG` and `bootstrap/60-migrate-mcp.sh`; with no host
+config the VM keeps its own MCP setup, unchanged.
+
 **It stays quiet when it wasn't asked.** Anyone can reply in a thread the bot
 owns, and most of those replies are people talking to each other. Those messages
 are handed to the agent with a note saying nobody mentioned it; if it decides the
@@ -424,7 +438,11 @@ itself, and it is never forwarded to Claude. Operator only.
 
 ```
 |help                 list the commands, with a one-line description each
-|status               VM state, SSH bridge, policy, grants, this thread's mode
+|status               VM state, SSH bridge, policy, grants, MCP, this thread's mode
+|mcp                  MCP servers, who may call what, recent calls
+|mcp tools <server>   ask an upstream live; marks each tool allowed or blocked
+|mcp allow <s> <glob> permit a tool from the next message
+|mcp calls            the MCP audit trail
 |silent               only answer in this thread when tagged
 |pause                answer nothing at all in this thread
 |resume               back to normal (lifts either one)

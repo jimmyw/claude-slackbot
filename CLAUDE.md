@@ -162,12 +162,74 @@ One module per command in `slackagent/commands/`, discovered with
   rather than as a failure.
 - `test_commands.py` covers the registry, argparse validation, `-h`, the
   never-forwarded rule, operator-only, and the prose cases that must reach Claude.
+- **`|mcp`** lists MCP servers, asks an upstream live what it offers (marking each tool
+  allowed or blocked), and changes policy at runtime. It never prints a credential.
 - **`|silent`, `|pause` and `|resume` set a per-thread mode** — see "Three thread
   modes" above.
 - A **new table** needs no migration, unlike a new column: `SCHEMA` runs on every
   open and `CREATE TABLE IF NOT EXISTS` does create one that is absent. That is why
   the mode lives in its own table rather than as a column on `threads` — and it
   also lets a thread be muted before the bot has ever run in it.
+
+## MCP through a host proxy
+
+The guest reaches MCP servers only through `mcpproxy.py` in the daemon, over a second
+reverse-forwarded loopback port on the same ssh invocation as the run. Credentials
+terminate on the host; `mcp-relay` in the guest holds none.
+
+- **Why at all.** A credential configured inside the VM is outside both the VM boundary
+  and the gate: one approved Bash call is code as `agent`, and from there it can be read
+  and the upstream called directly. The VM held three — a `Cookie` for syslog, an env
+  token for varys, and a full OAuth grant for esp-crash **including a refresh token**,
+  which is the worst because it is long-lived and re-mintable. Worse still,
+  `varys_mcp.py` was `0775 agent:agent` inside `/home/agent/work`, so the agent could
+  rewrite the MCP server that held its own credential.
+- **Identity is resolved on the host**, never claimed by the guest: the relay presents
+  the run token it already has for the hook, and the proxy maps token → run → Slack user
+  through `ApprovalService.run()`. That is what makes per-user credentials meaningful
+  rather than advisory, and it is why `mcp_calls` can name a person.
+- **The guest side is a relay, not an implementation**, because MCP stdio framing is
+  newline-delimited JSON-RPC. The proxy passes everything through verbatim and
+  intercepts two things: `tools/list` responses (filtered) and `tools/call` requests
+  (decided). `nextCursor` is preserved so filtering cannot break pagination.
+- **Filtered, not merely blocked.** A tool the caller may not use never appears, so it
+  cannot be planned around and the capability list itself stays out of the VM.
+- **A refusal is a tool result with `isError`, not a JSON-RPC error.** A protocol error
+  reads to the CLI as a broken server, and the agent would report the wrong thing.
+- **Server names are preserved** (`syslog`, `varys`, `esp-crash`), because Claude Code
+  takes the tool prefix from the config key and the 14 `mcp__*` grants already in the
+  database are written against those names.
+- **`--strict-mcp-config` is set as soon as any server is configured on the host**,
+  including for a caller entitled to none — an empty document plus strict is what says
+  "no MCP for you", where sending nothing falls back to whatever the VM has. With no
+  host config at all, nothing is passed and the guest's own setup is untouched, which is
+  what makes the change safe to deploy before the credentials move.
+- **Two rules decide policy.** Deny always wins, unioned across levels. The most
+  specific *configured* allow level wins, so a per-user list in the file can narrow as
+  well as widen — but **runtime `|mcp` rules are additive**, because a test caught
+  `|mcp allow` silently revoking everything else when they were treated as a per-user
+  list.
+- **A per_user server with no entry for the caller is not offered at all**, and there is
+  no implicit fallback to the shared credential: falling back would quietly let a guest
+  act as the operator upstream. `shared_fallback` opts in per server.
+- **OAuth grants live in `mcp_tokens`, not the file**, because refresh tokens rotate: a
+  grant kept only in the config would be dead after the first refresh, silently, looking
+  exactly like a broken upstream. Refresh happens on expiry with a 60s skew and once on
+  a 401, forcing a new token rather than retrying the value that just failed.
+- **The config file is refused if group or other can read it.** It holds tokens. A
+  malformed file keeps the last good copy instead: parsing is the only way a permission
+  appears, so a broken file cannot grant anything.
+- **The HTTP upstream does not open the optional server→client GET stream.** Progress and
+  logging arrive on the POST's own SSE body; sampling/roots/elicitation would need that
+  stream and are unsupported.
+- **`resources/*`, `prompts/*` and `completion/*` are refused outright** — default-deny
+  for capabilities nobody asked for, and `resources/read` is an arbitrary-read primitive.
+- **Per-run cost is unchanged.** Claude Code already re-initialised MCP servers on every
+  `-p` invocation, so the handshakes and the varys process start happened per message
+  anyway — they moved to the host. No warm pooling in v1.
+- `test_mcpproxy.py` drives the **real** relay against a fake upstream through the real
+  proxy over a real socket, and the fake records every call it receives, which is how "a
+  blocked call never leaves the host" is proved rather than asserted.
 
 ## Slack rendering
 
