@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_by TEXT
 );
 
+-- Threads the operator has muted with |pause. A separate table rather than a
+-- column on `threads`, for two reasons: a new table needs no migration (CREATE
+-- TABLE IF NOT EXISTS does create one that is absent, unlike a column), and a
+-- thread can be paused before the bot has ever run in it.
+CREATE TABLE IF NOT EXISTS paused_threads (
+    channel_id TEXT    NOT NULL,
+    thread_ts  TEXT    NOT NULL,
+    paused_at  INTEGER NOT NULL,
+    paused_by  TEXT,
+    PRIMARY KEY (channel_id, thread_ts)
+);
+
 -- Persistent "always allow" grants. These live on the HOST, in the daemon's
 -- database, so the agent can never grant itself anything: it asks, and the answer
 -- is computed out here.
@@ -231,6 +243,50 @@ class Store:
                 (int(time.time()), channel_id, thread_ts),
             )
             self._db.commit()
+
+    # -- pause --------------------------------------------------------------
+
+    def pause_thread(self, channel_id: str, thread_ts: str, paused_by: str) -> bool:
+        """Mute a thread. False if it was already paused."""
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO paused_threads "
+                "(channel_id, thread_ts, paused_at, paused_by) VALUES (?, ?, ?, ?)",
+                (channel_id, thread_ts, int(time.time()), paused_by),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def resume_thread(self, channel_id: str, thread_ts: str) -> bool:
+        """Unmute a thread. False if it was not paused."""
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM paused_threads WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def is_thread_paused(self, channel_id: str, thread_ts: str) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM paused_threads "
+                "WHERE channel_id = ? AND thread_ts = ?",
+                (channel_id, thread_ts),
+            ).fetchone()
+        return row is not None
+
+    def list_paused(self) -> list[tuple[str, str, int, str]]:
+        """(channel_id, thread_ts, paused_at, paused_by), oldest pause first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT channel_id, thread_ts, paused_at, paused_by "
+                "FROM paused_threads ORDER BY paused_at"
+            ).fetchall()
+        return [
+            (r["channel_id"], r["thread_ts"], int(r["paused_at"]), r["paused_by"] or "")
+            for r in rows
+        ]
 
     # -- settings -----------------------------------------------------------
 

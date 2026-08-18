@@ -177,6 +177,14 @@ writes the mapping before the CLI starts, so the mapping is durable even if the
 first run dies. One `asyncio.Lock` per thread keeps two fast replies from
 resuming the same session concurrently.
 
+**`|pause` shuts it up in one thread.** `|pause`, typed in a thread, stops
+everything said there from reaching Claude — replies, mentions and all — and the
+daemon posts nothing in reply either. It is stored in sqlite, so it survives a
+restart, and it lasts until `|resume` in the same thread. Other threads are
+unaffected, and the thread's session is untouched: resuming continues the same
+conversation with its context. `|status` says whether the thread you are in is
+paused, because a paused thread is deliberately indistinguishable from a quiet one.
+
 **It stays quiet when it wasn't asked.** Anyone can reply in a thread the bot
 owns, and most of those replies are people talking to each other. Those messages
 are handed to the agent with a note saying nobody mentioned it; if it decides the
@@ -369,7 +377,9 @@ itself, and it is never forwarded to Claude. Operator only.
 
 ```
 |help                 list the commands, with a one-line description each
-|status               VM state, SSH bridge, policy, grant count
+|status               VM state, SSH bridge, policy, grant count, this thread
+|pause                stop answering in this thread (mentions included)
+|resume               start answering in it again
 |auth                 list all modes, marking the current one
 |auth open            nothing asks at all
 |auth permissive      the default

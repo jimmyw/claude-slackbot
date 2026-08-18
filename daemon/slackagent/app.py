@@ -215,6 +215,17 @@ class Daemon:
         if await self._handle_command(channel, thread_ts, text, user or "", is_operator):
             return
 
+        # |pause is checked here, after commands: a paused thread must still accept
+        # |resume, or there would be no way out of it. Everything else in the thread
+        # is dropped — mentions included, since a pause the bot argues with is not a
+        # pause. Nothing is posted; the log line is the only trace.
+        if await asyncio.to_thread(self._store.is_thread_paused, channel, thread_ts):
+            log.info(
+                "thread is paused; not forwarding (channel=%s thread=%s user=%s)",
+                channel, thread_ts, user,
+            )
+            return
+
         lock = self._thread_locks[(channel, thread_ts)]
         async with lock:
             await self._run_turn(

@@ -151,7 +151,17 @@ One module per command in `slackagent/commands/`, discovered with
 - `-h` arrives as `CommandHelp` (a `CommandError` subclass) so it renders as usage
   rather than as a failure.
 - `test_commands.py` covers the registry, argparse validation, `-h`, the
-  never-forwarded rule, operator-only, and eight prose cases that must reach Claude.
+  never-forwarded rule, operator-only, and the prose cases that must reach Claude.
+- **`|pause` / `|resume` mute one thread**, stored in a `paused_threads` table.
+  Checked in `_on_message` *after* command dispatch, deliberately: a paused thread
+  has to keep accepting `|resume` or there is no way out of it. Everything else is
+  dropped, mentions included — a pause that argues back is not a pause — and
+  nothing is posted, so the log line is the only trace. `|status` reports it,
+  because silence-by-design and silence-by-breakage look identical in Slack.
+- A **new table** needs no migration, unlike a new column: `SCHEMA` runs on every
+  open and `CREATE TABLE IF NOT EXISTS` does create one that is absent. That is why
+  the pause lives in its own table rather than as a column on `threads` — and it
+  also lets a thread be paused before the bot has ever run in it.
 
 ## Slack rendering
 
