@@ -47,6 +47,10 @@ tar -C "$REPO_DIR/vm-files" -cf - etc home usr \
             /tmp/vmfiles/home/agent/CLAUDE.md /home/agent/CLAUDE.md
         sudo install -D -m 0755 -o root -g root \
             /tmp/vmfiles/usr/local/bin/agent-exec /usr/local/bin/agent-exec
+        # The guest's only route to the host's MCP proxy. Root-owned for the same
+        # reason as the gate: the agent must not be able to repoint its own traffic.
+        sudo install -D -m 0755 -o root -g root \
+            /tmp/vmfiles/usr/local/bin/mcp-relay /usr/local/bin/mcp-relay
 
         # The one thing the agent needs to write. Never clobber an existing
         # MEMORY.md — it is the only state that survives between sessions.
@@ -73,6 +77,8 @@ ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
 
     echo -n "  agent-exec:          "
     test -x /usr/local/bin/agent-exec && echo installed || echo MISSING
+    echo -n "  mcp-relay:           "
+    test -x /usr/local/bin/mcp-relay && echo installed || echo MISSING
 
     gate() { # tool_name json_input -> allow|deny
         printf "{\"tool_name\":\"%s\",\"tool_input\":%s}" "$1" "$2" \
