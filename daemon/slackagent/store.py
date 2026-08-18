@@ -85,6 +85,65 @@ CREATE TABLE IF NOT EXISTS thread_modes (
     PRIMARY KEY (channel_id, thread_ts)
 );
 
+-- MCP: the audit trail the host-side proxy exists for. One row per tool call the
+-- guest attempted, decided out here where the agent cannot reach it. slack_user is
+-- resolved from the run token on the host, NOT from anything the guest sent, so it
+-- names a person the guest could not have lied about.
+CREATE TABLE IF NOT EXISTS mcp_calls (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    called_at   INTEGER NOT NULL,
+    slack_user  TEXT,
+    channel_id  TEXT,
+    thread_ts   TEXT,
+    session_id  TEXT,
+    server      TEXT    NOT NULL,
+    tool        TEXT    NOT NULL,
+    decision    TEXT    NOT NULL
+        CHECK (decision IN ('allowed', 'denied', 'capped', 'error')),
+    reason      TEXT,
+    args_digest TEXT,
+    result_bytes INTEGER,
+    duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS mcp_calls_recent ON mcp_calls (called_at);
+
+-- OAuth grants for MCP upstreams, per (server, slack_user). slack_user '' is the
+-- shared grant. These live here rather than in the config file because refresh
+-- tokens ROTATE: the first refresh would otherwise invalidate the value in the
+-- file and silently brick the credential.
+CREATE TABLE IF NOT EXISTS mcp_tokens (
+    server        TEXT    NOT NULL,
+    slack_user    TEXT    NOT NULL DEFAULT '',
+    access_token  TEXT,
+    refresh_token TEXT,
+    expires_at    INTEGER,
+    updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (server, slack_user)
+);
+
+-- Runtime policy changes from |mcp, so allowing a newly discovered tool needs no
+-- file edit and no restart. Credentials are NEVER stored here — only patterns.
+-- slack_user '' means everyone; a per-user row wins over it.
+CREATE TABLE IF NOT EXISTS mcp_policy (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    server     TEXT    NOT NULL,
+    slack_user TEXT    NOT NULL DEFAULT '',
+    effect     TEXT    NOT NULL CHECK (effect IN ('allow', 'deny')),
+    pattern    TEXT    NOT NULL,
+    created_at INTEGER NOT NULL,
+    created_by TEXT    NOT NULL,
+    UNIQUE (server, slack_user, effect, pattern)
+);
+
+-- Servers switched off from Slack. Absence means enabled, like thread_modes:
+-- enabling is a DELETE and a newly configured server needs no write to be live.
+CREATE TABLE IF NOT EXISTS mcp_disabled (
+    server      TEXT    PRIMARY KEY,
+    disabled_at INTEGER NOT NULL,
+    disabled_by TEXT
+);
+
 -- Persistent "always allow" grants. These live on the HOST, in the daemon's
 -- database, so the agent can never grant itself anything: it asks, and the answer
 -- is computed out here.
@@ -560,6 +619,160 @@ class Store:
             cursor = self._db.execute("DELETE FROM grants")
             self._db.commit()
             return cursor.rowcount
+
+    # -- MCP: audit, tokens, runtime policy ---------------------------------
+
+    def record_mcp_call(
+        self,
+        *,
+        slack_user: str,
+        channel_id: str,
+        thread_ts: str,
+        session_id: str,
+        server: str,
+        tool: str,
+        decision: str,
+        reason: str = "",
+        args_digest: str = "",
+        result_bytes: int = 0,
+        duration_ms: int = 0,
+    ) -> None:
+        """Write one attempted MCP call to the audit trail.
+
+        Every attempt, not only the successful ones: a denied call is the more
+        interesting row, because it says what the agent wanted.
+        """
+        if decision not in {"allowed", "denied", "capped", "error"}:
+            raise ValueError(f"bad mcp decision: {decision!r}")
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO mcp_calls (called_at, slack_user, channel_id, "
+                "thread_ts, session_id, server, tool, decision, reason, "
+                "args_digest, result_bytes, duration_ms) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(time.time()), slack_user, channel_id, thread_ts, session_id,
+                    server, tool, decision, reason, args_digest, result_bytes,
+                    duration_ms,
+                ),
+            )
+            self._db.commit()
+
+    def recent_mcp_calls(self, limit: int = 20) -> list[sqlite3.Row]:
+        with self._lock:
+            return self._db.execute(
+                "SELECT * FROM mcp_calls ORDER BY called_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+
+    def mcp_call_summary(self, since: int) -> list[sqlite3.Row]:
+        """(server, tool, decision, n) since a timestamp, for |mcp."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT server, tool, decision, COUNT(*) AS n FROM mcp_calls "
+                "WHERE called_at >= ? GROUP BY server, tool, decision "
+                "ORDER BY n DESC",
+                (since,),
+            ).fetchall()
+
+    def mcp_token(self, server: str, slack_user: str = "") -> sqlite3.Row | None:
+        with self._lock:
+            return self._db.execute(
+                "SELECT * FROM mcp_tokens WHERE server = ? AND slack_user = ?",
+                (server, slack_user),
+            ).fetchone()
+
+    def save_mcp_token(
+        self,
+        server: str,
+        slack_user: str,
+        *,
+        access_token: str,
+        refresh_token: str,
+        expires_at: int,
+    ) -> None:
+        """Persist a grant after a refresh, rotated refresh token included."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO mcp_tokens (server, slack_user, access_token, "
+                "refresh_token, expires_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(server, slack_user) DO UPDATE SET "
+                "access_token = excluded.access_token, "
+                "refresh_token = excluded.refresh_token, "
+                "expires_at = excluded.expires_at, "
+                "updated_at = excluded.updated_at",
+                (
+                    server, slack_user, access_token, refresh_token, expires_at,
+                    int(time.time()),
+                ),
+            )
+            self._db.commit()
+
+    def add_mcp_policy(
+        self, server: str, effect: str, pattern: str, created_by: str,
+        slack_user: str = "",
+    ) -> int:
+        """Add a runtime allow/deny pattern. Idempotent."""
+        if effect not in {"allow", "deny"}:
+            raise ValueError(f"bad effect: {effect!r}")
+        now = int(time.time())
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id FROM mcp_policy WHERE server = ? AND slack_user = ? "
+                "AND effect = ? AND pattern = ?",
+                (server, slack_user, effect, pattern),
+            ).fetchone()
+            if row is not None:
+                return int(row["id"])
+            cursor = self._db.execute(
+                "INSERT INTO mcp_policy (server, slack_user, effect, pattern, "
+                "created_at, created_by) VALUES (?, ?, ?, ?, ?, ?)",
+                (server, slack_user, effect, pattern, now, created_by),
+            )
+            self._db.commit()
+            return int(cursor.lastrowid or 0)
+
+    def mcp_policy(self, server: str | None = None) -> list[sqlite3.Row]:
+        sql = "SELECT * FROM mcp_policy"
+        params: tuple[str, ...] = ()
+        if server is not None:
+            sql += " WHERE server = ?"
+            params = (server,)
+        sql += " ORDER BY server, slack_user, effect, pattern"
+        with self._lock:
+            return self._db.execute(sql, params).fetchall()
+
+    def remove_mcp_policy(self, policy_id: int) -> bool:
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM mcp_policy WHERE id = ?", (policy_id,)
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def mcp_disabled(self) -> set[str]:
+        with self._lock:
+            return {
+                row["server"]
+                for row in self._db.execute("SELECT server FROM mcp_disabled")
+            }
+
+    def set_mcp_enabled(self, server: str, enabled: bool, by: str = "") -> bool:
+        """Enable or disable a server. Returns True if this changed anything."""
+        with self._lock:
+            if enabled:
+                cursor = self._db.execute(
+                    "DELETE FROM mcp_disabled WHERE server = ?", (server,)
+                )
+                self._db.commit()
+                return cursor.rowcount > 0
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO mcp_disabled "
+                "(server, disabled_at, disabled_by) VALUES (?, ?, ?)",
+                (server, int(time.time()), by),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
 
     # -- approvals ----------------------------------------------------------
 
