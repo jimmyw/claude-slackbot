@@ -192,6 +192,118 @@ class StdioUpstream(Upstream):
                 await self._process.wait()
 
 
+class OAuth:
+    """Access tokens for an OAuth-protected MCP upstream, refreshed on the host.
+
+    This is the credential the VM must never hold. The guest's copy of the esp-crash
+    grant included a REFRESH token: long-lived and re-mintable, so stealing it buys
+    access that outlives the run, the VM and any policy. Here it lives in the daemon's
+    sqlite, per (server, owner), and the guest sees only tool results.
+
+    The rotation is the part that is easy to get wrong. Authorisation servers commonly
+    issue a NEW refresh token with each refresh and invalidate the old one, so a grant
+    kept in the config file would be dead after the first refresh — silently, and in a
+    way that looks like the upstream is broken. The store is therefore the authority
+    once seeded, and the config file only bootstraps.
+    """
+
+    # Refresh a little early: a token that expires between the check and the request
+    # would otherwise cost a 401 and a retry on every call at the boundary.
+    SKEW_S = 60
+
+    def __init__(
+        self,
+        store: Store,
+        server_name: str,
+        credential: mcpconfig.Credential,
+        *,
+        session: aiohttp.ClientSession | None = None,
+    ) -> None:
+        self._store = store
+        self._server = server_name
+        self._owner = credential.owner
+        self._config = dict(credential.oauth or {})
+        self._session = session
+        self._lock = asyncio.Lock()
+
+    @property
+    def configured(self) -> bool:
+        return bool(self._config.get("token_url"))
+
+    async def header(self, force: bool = False) -> dict[str, str]:
+        token = await self._access_token(force)
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    async def _access_token(self, force: bool) -> str:
+        async with self._lock:
+            row = self._store.mcp_token(self._server, self._owner)
+            access = (row["access_token"] if row else "") or self._config.get(
+                "access_token", ""
+            )
+            expires_at = int(
+                (row["expires_at"] if row else 0) or self._config.get("expires_at") or 0
+            )
+            fresh_enough = access and (
+                not expires_at or expires_at - self.SKEW_S > time.time()
+            )
+            if fresh_enough and not force:
+                return access
+            return await self._refresh(row)
+
+    async def _refresh(self, row: Any) -> str:
+        refresh_token = (
+            (row["refresh_token"] if row else "") or self._config.get("refresh_token")
+        )
+        if not refresh_token:
+            raise RuntimeError(
+                f"no refresh token for {self._server}; re-authorise it on the host"
+            )
+
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": self._config.get("client_id", ""),
+        }
+        if self._config.get("client_secret"):
+            payload["client_secret"] = self._config["client_secret"]
+        if self._config.get("scope"):
+            payload["scope"] = self._config["scope"]
+
+        session = self._session or aiohttp.ClientSession()
+        try:
+            async with session.post(
+                self._config["token_url"], data=payload
+            ) as response:
+                body = await response.json(content_type=None)
+                if response.status >= 400:
+                    raise RuntimeError(
+                        f"refreshing {self._server} failed with HTTP "
+                        f"{response.status}: {str(body)[:200]}"
+                    )
+        finally:
+            if self._session is None:
+                await session.close()
+
+        access = body.get("access_token") or ""
+        if not access:
+            raise RuntimeError(f"refreshing {self._server} returned no access_token")
+        expires_in = int(body.get("expires_in") or 0)
+        self._store.save_mcp_token(
+            self._server,
+            self._owner,
+            access_token=access,
+            # Keep the old one when the server does not rotate; store the new one
+            # when it does. Dropping a rotated token is what bricks the grant.
+            refresh_token=body.get("refresh_token") or refresh_token,
+            expires_at=int(time.time()) + expires_in if expires_in else 0,
+        )
+        log.info(
+            "refreshed the %s oauth token for %s",
+            self._server, self._owner or "everyone",
+        )
+        return access
+
+
 class HttpUpstream(Upstream):
     """A streamable-HTTP MCP server, with the credential injected here.
 
@@ -207,13 +319,13 @@ class HttpUpstream(Upstream):
         headers: dict[str, str],
         *,
         session: aiohttp.ClientSession | None = None,
-        auth_header: Callable[[], Awaitable[dict[str, str]]] | None = None,
+        auth: OAuth | None = None,
     ) -> None:
         self._server = server
         self._headers = dict(headers)
         self._session = session
         self._owns_session = session is None
-        self._auth_header = auth_header
+        self._auth = auth
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue()
         self._mcp_session_id: str | None = None
         self._protocol_version: str | None = None
@@ -222,7 +334,7 @@ class HttpUpstream(Upstream):
         if self._session is None:
             self._session = aiohttp.ClientSession()
 
-    async def _request_headers(self) -> dict[str, str]:
+    async def _request_headers(self, force_auth: bool = False) -> dict[str, str]:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
@@ -232,8 +344,8 @@ class HttpUpstream(Upstream):
             headers["Mcp-Session-Id"] = self._mcp_session_id
         if self._protocol_version:
             headers["MCP-Protocol-Version"] = self._protocol_version
-        if self._auth_header is not None:
-            headers.update(await self._auth_header())
+        if self._auth is not None:
+            headers.update(await self._auth.header(force=force_auth))
         return headers
 
     async def send(self, message: dict) -> None:
@@ -251,9 +363,11 @@ class HttpUpstream(Upstream):
     async def _post(self, message: dict, *, retry_auth: bool = True) -> None:
         assert self._session is not None
         async with self._session.post(
-            self._server.url, json=message, headers=await self._request_headers()
+            self._server.url,
+            json=message,
+            headers=await self._request_headers(force_auth=not retry_auth),
         ) as response:
-            if response.status == 401 and retry_auth and self._auth_header is not None:
+            if response.status == 401 and retry_auth and self._auth is not None:
                 # One retry: an access token can expire mid-session, and the provider
                 # refreshes on demand.
                 log.info("mcp[%s] 401, refreshing and retrying once",
@@ -473,7 +587,10 @@ class McpProxy:
             # Slack tokens).
             env = {"PATH": "/usr/local/bin:/usr/bin:/bin", **credential.env}
             return StdioUpstream(server, env)
-        return HttpUpstream(server, credential.headers)
+        auth = OAuth(self._store, server.name, credential)
+        return HttpUpstream(
+            server, credential.headers, auth=auth if auth.configured else None
+        )
 
 
 class _Session:
