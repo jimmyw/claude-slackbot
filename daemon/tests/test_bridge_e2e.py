@@ -110,7 +110,11 @@ def make_config(vm_host: str, db: Path, port: int) -> Config:
 async def scenario(vm_host: str, decision: str, port: int, tmp: Path) -> None:
     print(f"\n[{decision}] real VM, real tunnel, operator clicks {decision.title()}")
 
-    canary = f"/home/agent/work/canary-{decision}-{uuid.uuid4().hex[:8]}.txt"
+    # OUTSIDE the workspace, deliberately. Since the permissive policy landed, a
+    # Write inside /home/agent/work is auto-allowed — so a canary in there proves the
+    # transport works and nothing about the gate, which is what this suite is for.
+    # /home/agent is one of the paths the hook asks about.
+    canary = f"/home/agent/canary-{decision}-{uuid.uuid4().hex[:8]}.txt"
     store = Store(tmp / f"{decision}.sqlite3")
     holder: dict[str, ApprovalService] = {}
     slack = AutoClickingSlack(lambda: holder["svc"], decision)
@@ -169,6 +173,7 @@ async def scenario(vm_host: str, decision: str, port: int, tmp: Path) -> None:
     exists = await file_exists(config, canary)
     if decision == "approve":
         check("the file WAS created in the VM", exists)
+        await remove_file(config, canary)
     else:
         check("the file was NOT created in the VM", not exists)
         denials = (result or {}).get("permission_denials") or []
@@ -182,6 +187,23 @@ async def scenario(vm_host: str, decision: str, port: int, tmp: Path) -> None:
 
     await service.stop()
     store.close()
+
+
+async def remove_file(config: Config, path: str) -> None:
+    """Tidy up an approved canary; it lives outside the workspace."""
+    admin = Path("~/.ssh/agent_vm_admin_ed25519").expanduser()
+    process = await asyncio.create_subprocess_exec(
+        "ssh", "-i", str(admin),
+        "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        f"admin@{config.vm_host}",
+        # sudo sh -c, so root expands nothing surprising and can remove an
+        # agent-owned file in a directory admin cannot traverse.
+        f"sudo sh -c 'rm -f {path}'",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    await process.wait()
 
 
 async def file_exists(config: Config, path: str) -> bool:
@@ -199,6 +221,37 @@ async def file_exists(config: Config, path: str) -> bool:
     return await process.wait() == 0
 
 
+async def system_prompt_reaches_the_agent(vm_host: str, tmp: Path) -> None:
+    """--append-system-prompt is a new flag on the guest's CLI; prove it lands.
+
+    The identity the daemon injects is the only way the agent knows what it is called
+    in Slack, and a flag that agent-exec passed wrongly would fail on every real run
+    while every fake-bridge test still passed. No tools, so nothing to approve.
+    """
+    print("\n[identity] the injected system prompt reaches the model")
+
+    config = make_config(vm_host, tmp / "identity.sqlite3", 19303)
+    bridge = Bridge(config)
+    events: list[dict] = []
+    async for event in bridge.run(
+        prompt="What is your Slack handle? Answer with the handle and nothing else.",
+        session_id=str(uuid.uuid4()),
+        resume=False,
+        run_token=uuid.uuid4().hex,
+        system_append=(
+            "You are @canary-handle-7f3a in this Slack workspace; your user id is "
+            "<@U0TESTONLY>. Answer questions about your identity from this note."
+        ),
+    ):
+        events.append(event)
+
+    result = next((e for e in events if e.get("type") == "result"), None)
+    answer = (result or {}).get("result") or ""
+    check("the run completed", result is not None)
+    check("the model answered from the injected system prompt",
+          "canary-handle-7f3a" in answer, answer[:120])
+
+
 async def main() -> int:
     if len(sys.argv) != 2:
         print(__doc__)
@@ -211,6 +264,7 @@ async def main() -> int:
         tmp = Path(raw)
         await scenario(vm_host, "approve", 19301, tmp)
         await scenario(vm_host, "deny", 19302, tmp)
+        await system_prompt_reaches_the_agent(vm_host, tmp)
 
     print()
     if failures:
