@@ -10,6 +10,7 @@ Run:  .venv/bin/python -m tests.test_attribution
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import sys
 import tempfile
 from pathlib import Path
@@ -17,7 +18,7 @@ from pathlib import Path
 from slackagent import prompt as prompts
 from slackagent.render import SILENT_MARKER
 from slackagent.store import MODE_ACTIVE, MODE_PAUSED, MODE_SILENT
-from slackagent.transcript import catch_up
+from slackagent.transcript import MAX_PAGES, catch_up
 
 from tests.test_commands import AUTHORIZED, make_daemon
 from tests.test_silence import FakeBridge
@@ -193,14 +194,21 @@ def test_transcript_formatting() -> None:
 
 
 class FakeSlackHistory:
-    """conversations.replies, scripted."""
+    """conversations.replies, scripted — including its pagination.
+
+    `page_size` makes it serve the messages a page at a time with a real cursor,
+    which is the only way to test that the fetch walks to the NEWEST end of a thread
+    rather than quoting the first page of it.
+    """
 
     def __init__(self, messages: list[dict], *, has_more: bool = False,
-                 fail: Exception | None = None, hang: bool = False) -> None:
+                 fail: Exception | None = None, hang: bool = False,
+                 page_size: int | None = None) -> None:
         self.messages = messages
         self.has_more = has_more
         self.fail = fail
         self.hang = hang
+        self.page_size = page_size
         self.calls: list[dict] = []
 
     async def conversations_replies(self, **kwargs):  # noqa: N802
@@ -209,7 +217,19 @@ class FakeSlackHistory:
             raise self.fail
         if self.hang:
             await asyncio.sleep(30)
-        return {"messages": self.messages, "has_more": self.has_more}
+        if self.page_size is None:
+            return {"messages": self.messages, "has_more": self.has_more}
+
+        start = int(kwargs.get("cursor") or 0)
+        end = start + self.page_size
+        page = self.messages[start:end]
+        if end >= len(self.messages):
+            return {"messages": page, "has_more": self.has_more}
+        return {
+            "messages": page,
+            "has_more": True,
+            "response_metadata": {"next_cursor": str(end)},
+        }
 
 
 async def test_catch_up() -> None:
@@ -242,10 +262,23 @@ async def test_catch_up() -> None:
           client.calls[0]["oldest"] == "2.0" and client.calls[0]["latest"] == "4.0",
           client.calls[0])
 
-    check("no watermark means no fetch at all — NOT 'fetch everything'",
+    check("no watermark and no cold start means no fetch at all",
           await catch_up(FakeSlackHistory(msgs), channel="C1", thread_ts="1.0",
                          since_ts=None, current_ts="4.0",
                          bot_user_id="U_BOT", bot_id="B_BOT") is None)
+
+    cold_client = FakeSlackHistory(msgs)
+    cold = await catch_up(cold_client, channel="C1", thread_ts="1.0", since_ts=None,
+                          current_ts="4.0", bot_user_id="U_BOT", bot_id="B_BOT",
+                          cold_start=True)
+    check("the first mention in a thread brings the thread with it",
+          "parent" in cold and "already seen" in cold and "the build broke" in cold,
+          cold)
+    check("and it is the same transcript, so the same exclusions hold",
+          "my own reply" not in cold and "|status" not in cold
+          and "channel_join" not in cold and "can you look?" not in cold, cold)
+    check("no floor is sent to the API, so the whole thread is in the window",
+          "oldest" not in cold_client.calls[0], cold_client.calls[0])
     check("a mention on the thread root has nothing before it",
           await catch_up(FakeSlackHistory(msgs), channel="C1", thread_ts="1.0",
                          since_ts="0.5", current_ts="1.0",
@@ -258,6 +291,32 @@ async def test_catch_up() -> None:
           await catch_up(FakeSlackHistory([msgs[0]]), channel="C1", thread_ts="1.0",
                          since_ts="2.0", current_ts="4.0",
                          bot_user_id="U_BOT", bot_id="B_BOT") is None)
+
+    print("\n[7b] a cold start reads the NEWEST end of a long thread")
+    long_thread = [
+        {"ts": f"{i + 1}.0", "user": "U1", "text": f"message {i}"} for i in range(120)
+    ]
+    long_thread.append({"ts": "500.0", "user": "U1", "text": "can you look?"})
+    paged = FakeSlackHistory(long_thread, page_size=25)
+    block = await catch_up(paged, channel="C1", thread_ts="1.0", since_ts=None,
+                           current_ts="500.0", bot_user_id="U_BOT", bot_id="B_BOT",
+                           cold_start=True)
+    check("it paginated rather than quoting the first page",
+          len(paged.calls) == 5, len(paged.calls))
+    check("the newest messages are the ones quoted",
+          "message 119" in block and "message 0" not in block, block[:200])
+    check("and the ones left out are reported, not dropped in silence",
+          "left out" in block, block[:260])
+
+    # has_more that never ends: the page budget runs out with the newest end still
+    # ahead, so what is held is the START of the thread — the wrong end entirely.
+    endless = FakeSlackHistory(long_thread, page_size=1, has_more=True)
+    check("an unreachable tail quotes nothing rather than the wrong end",
+          await catch_up(endless, channel="C1", thread_ts="1.0", since_ts=None,
+                         current_ts="500.0", bot_user_id="U_BOT", bot_id="B_BOT",
+                         cold_start=True) is None)
+    check("and it gave up on a budget rather than reading forever",
+          len(endless.calls) == MAX_PAGES, len(endless.calls))
 
     print("\n[8] a failing fetch costs the reply nothing")
     check("an API error degrades to no transcript",
@@ -322,12 +381,83 @@ async def test_pause_is_not_backfilled() -> None:
         store.set_thread_mode("C1", "1.0", MODE_ACTIVE, AUTHORIZED)
 
 
+async def test_first_mention_backfills() -> None:
+    """The whole point, end to end: tagged into a conversation already in progress."""
+    print("\n[10] a first mention in an existing thread carries the thread with it")
+    history = [
+        {"ts": "1.0", "user": "U1", "text": "the IR parser is dropping frames again"},
+        {"ts": "2.0", "user": "U2", "text": "same hub as last week?"},
+        {"ts": "3.0", "user": "U1", "text": "yes, the one in the lab"},
+    ]
+
+    with tempfile.TemporaryDirectory() as raw:
+        daemon = make_daemon(Path(raw))
+        daemon._bot_user_id = "U_BOT"  # noqa: SLF001
+        daemon._bot_id = "B_BOT"  # noqa: SLF001
+        daemon._vm.is_running = lambda: asyncio.sleep(0, result=True)  # noqa: SLF001
+        fetcher = FakeSlackHistory(history)
+        daemon._app.client.conversations_replies = fetcher.conversations_replies  # noqa: SLF001
+
+        # No session and no watermark: this thread has been going without the bot.
+        daemon._bridge = bridge = FakeBridge("looking now")  # noqa: SLF001
+        await daemon._on_message(  # noqa: SLF001
+            {"channel": "C1", "thread_ts": "1.0", "ts": "4.0",
+             "text": "can you take a look?", "user": AUTHORIZED,
+             "channel_type": "channel"},
+            is_mention=True,
+        )
+        prompt = bridge.prompts[-1]
+        check("the thread so far reaches the agent",
+              "the IR parser is dropping frames again" in prompt
+              and "same hub as last week?" in prompt, prompt[:400])
+        check("as quoted background, not as the question",
+              "do NOT answer these" in prompt, prompt[:200])
+        check("and the mention itself is still the last thing in the prompt",
+              prompt.rstrip().endswith("can you take a look?"), prompt[-120:])
+
+        # The watermark now exists, so the next mention is a gap read, not a
+        # cold start — the history is not quoted a second time.
+        check("the watermark was written",
+              daemon._store.last_forwarded_ts("C1", "1.0") == "4.0",  # noqa: SLF001
+              daemon._store.last_forwarded_ts("C1", "1.0"))  # noqa: SLF001
+        daemon._bridge = bridge = FakeBridge("still looking")  # noqa: SLF001
+        await daemon._on_message(  # noqa: SLF001
+            {"channel": "C1", "thread_ts": "1.0", "ts": "5.0", "text": "any luck?",
+             "user": AUTHORIZED, "channel_type": "channel"},
+            is_mention=True,
+        )
+        check("a second mention does not re-quote what was already sent",
+              "the IR parser is dropping frames again" not in bridge.prompts[-1],
+              bridge.prompts[-1][:200])
+
+    with tempfile.TemporaryDirectory() as raw:
+        off = make_daemon(Path(raw))
+        off._config = dataclasses.replace(  # noqa: SLF001
+            off._config, catch_up_new_threads=False)  # noqa: SLF001
+        off._bot_user_id = "U_BOT"  # noqa: SLF001
+        off._bot_id = "B_BOT"  # noqa: SLF001
+        off._vm.is_running = lambda: asyncio.sleep(0, result=True)  # noqa: SLF001
+        fetcher = FakeSlackHistory(history)
+        off._app.client.conversations_replies = fetcher.conversations_replies  # noqa: SLF001
+        off._bridge = bridge = FakeBridge("hi")  # noqa: SLF001
+        await off._on_message(  # noqa: SLF001
+            {"channel": "C1", "thread_ts": "1.0", "ts": "4.0",
+             "text": "can you take a look?", "user": AUTHORIZED,
+             "channel_type": "channel"},
+            is_mention=True,
+        )
+        check("CATCH_UP_NEW_THREADS=0 reads nothing, not even the API call",
+              fetcher.calls == [] and "IR parser" not in bridge.prompts[-1],
+              fetcher.calls)
+
+
 async def main() -> int:
     test_pure()
     await test_wired()
     test_transcript_formatting()
     await test_catch_up()
     await test_pause_is_not_backfilled()
+    await test_first_mention_backfills()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")
