@@ -388,8 +388,19 @@ Per thread, in `thread_modes`: `active` (default), `silent` (`|silent`), `paused
   promises nothing said in the thread reaches Claude, so backfilling it would make the
   daemon lie in three places. Backfilling a `|silent` window is the entire point of
   that mode. The asymmetry is the design, and both directions are tested.
-- **NULL means "start here", never "fetch everything"** — otherwise the first mention
-  in each existing thread drags its whole history into a prompt.
+- **NULL means the thread so far, on the first mention only** (`CATCH_UP_NEW_THREADS`,
+  default on, passed as `cold_start`). This reverses the original rule — NULL used to
+  mean "start here" so the bot could not be tagged into an existing conversation and
+  told to look at it, which is the most common way it gets used. The bound is what
+  makes it affordable, not the watermark: the same 20/6000 cap applies, so a busy
+  thread costs what a long `|silent` gap costs. With the knob off, the old behaviour
+  is exactly what you get, and no API call is made at all.
+- **The fetch walks to the newest end, and quotes nothing if it cannot get there.**
+  `conversations.replies` returns a window oldest-first, so one capped call yields the
+  OLDEST messages in it — the wrong end, since the mention is about the newest. It now
+  pages (200 per page, 10 pages) and keeps the tail. Past that budget it returns None
+  with a warning rather than quoting the start of a 2000-message thread as "what you
+  missed", which would point the agent away from the question.
 - The mark is written **before** the run: "forwarded" is true when it is sent, and
   advancing afterwards would make a crashed run replay a growing transcript on every
   retry.

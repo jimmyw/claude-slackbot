@@ -67,6 +67,13 @@ class Config:
 
     extra_system_prompt: str = field(default="")
 
+    # Whether the first mention in a thread the bot has never spoken in brings that
+    # thread's history along. On: the common case is someone tagging the bot into a
+    # conversation that is already the question. Off: it only ever sees what was said
+    # after it was tagged, which is the stricter reading of "it was not in this
+    # thread". Bounded either way by prompt.MAX_* — see slackagent/transcript.py.
+    catch_up_new_threads: bool = True
+
     # MCP proxy, all optional: with no mcp_config there are no host-side servers and
     # the guest's own MCP configuration is left exactly as it was. The credentials and
     # policy live in that separate 0600 file rather than in .env — see
@@ -125,6 +132,12 @@ class Config:
             ).expanduser(),
             update_interval_s=float(os.environ.get("UPDATE_INTERVAL_S", "1.2")),
             extra_system_prompt=os.environ.get("EXTRA_SYSTEM_PROMPT", ""),
+            # On unless explicitly disabled, unlike FORWARD_AGENT: this grants
+            # nothing the bot cannot already read the moment it is tagged, it only
+            # decides how far back the first tag looks.
+            catch_up_new_threads=os.environ.get(
+                "CATCH_UP_NEW_THREADS", "1"
+            ).strip().lower() not in {"0", "false", "no", "off"},
             mcp_config=(
                 Path(os.path.expanduser(os.environ["MCP_CONFIG"]))
                 if os.environ.get("MCP_CONFIG", "").strip()

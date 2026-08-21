@@ -326,6 +326,10 @@ class Daemon:
                 current_ts=message_ts,
                 bot_user_id=self._bot_user_id,
                 bot_id=self._bot_id,
+                # No watermark means this thread has never been forwarded from —
+                # typically someone tagging the bot into a conversation that has
+                # been going without it. Reading it back is the point.
+                cold_start=self._config.catch_up_new_threads,
             )
 
         # Marked BEFORE the run, not after. The fact being recorded is "this was

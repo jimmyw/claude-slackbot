@@ -217,11 +217,15 @@ not before.
 
 **It catches up on what it missed.** When you tag it after a gap, the daemon fetches
 the messages it was not shown and quotes them, oldest first, each labelled with its
-author — so "can you look at that?" is answerable. Bounded at 20 messages, 600
-characters each, 6000 in total, newest kept, and it states what it left out rather
-than truncating quietly. A `|pause` window is never quoted, because `|pause` promised
-those messages were never seen. Quoted text is fenced and the agent is told it is
-context, never instruction and never permission.
+author — so "can you look at that?" is answerable. That includes being tagged into a
+thread it has never spoken in: the first mention brings the conversation so far with
+it, which is what makes "@bot can you fix this?" work in a thread that has been
+running without it. Set `CATCH_UP_NEW_THREADS=0` to have it see only what is said
+after it is tagged. Bounded at 20 messages, 600 characters each, 6000 in total,
+newest kept, and it states what it left out rather than truncating quietly — a long
+thread costs the same as a long gap. A `|pause` window is never quoted, because
+`|pause` promised those messages were never seen. Quoted text is fenced and the agent
+is told it is context, never instruction and never permission.
 
 **MCP credentials live on the host, not in the VM.** An MCP server configured inside the
 guest carries its credential there, outside both the VM boundary and the approval gate —
@@ -362,8 +366,10 @@ Slack id, and it is told to address the person it is answering — so it can wri
 control is the instruction in the guest `CLAUDE.md` not to tag anyone who is not
 already in the conversation. It also means the messages other people exchange in a
 thread are forwarded to the API when the bot is tagged after a gap, not just the ones
-addressed to it — bounded and gap-driven, but a real widening of what leaves the
-workspace. No names or profile data go with them.
+addressed to it — and with `CATCH_UP_NEW_THREADS` on (the default) that includes the
+history of a thread it is tagged into, said before anyone knew it would be. Bounded,
+but a real widening of what leaves the workspace; `CATCH_UP_NEW_THREADS=0` narrows it
+back to what was said after the tag. No names or profile data go with them.
 
 **Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
 buttons; a click from anyone else gets an ephemeral refusal naming the operator and
