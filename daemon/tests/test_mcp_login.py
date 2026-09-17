@@ -228,6 +228,16 @@ async def test_refusals() -> None:
         check("an empty paste is rejected with a field error, not silently accepted",
               result.get("response_action") == "errors", result)
 
+        result = await service.handle_submit(
+            submit_body(view["private_metadata"], "just-a-raw-value-no-name",
+                        OPERATOR)
+        )
+        check("a value with no name=value shape is rejected too — this is exactly "
+              "the mistake that broke syslog's real login the first time",
+              result.get("response_action") == "errors", result)
+        check("and it was never written to the store either",
+              store.mcp_header_override("syslog") is None)
+
         store.close()
 
 

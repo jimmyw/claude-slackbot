@@ -154,11 +154,24 @@ class McpLoginService:
                     {
                         "type": "input",
                         "block_id": _BLOCK_ID,
-                        "label": {"type": "plain_text", "text": "New credential value"},
+                        "label": {"type": "plain_text", "text": "New Cookie header"},
+                        "hint": {
+                            "type": "plain_text",
+                            "text": (
+                                "The whole name=value pair, exactly as sent in a "
+                                "browser's Cookie request header — not just the "
+                                "value from a devtools \"Value\" column, which is "
+                                "missing the name and will be rejected."
+                            ),
+                        },
                         "element": {
                             "type": "plain_text_input",
                             "action_id": _ACTION_ID,
                             "multiline": True,
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": "name=value",
+                            },
                         },
                     }
                 ],
@@ -201,6 +214,21 @@ class McpLoginService:
             return {
                 "response_action": "errors",
                 "errors": {_BLOCK_ID: "Paste a value first."},
+            }
+        if "=" not in value:
+            # The one mistake this modal actually caused: pasting just a cookie's
+            # value (e.g. copied from devtools' "Value" column) rather than the
+            # name=value pair a Cookie header needs. A value with no "=" at all
+            # cannot be that pair, so catch it here instead of storing a header
+            # the upstream will silently 401 on.
+            return {
+                "response_action": "errors",
+                "errors": {
+                    _BLOCK_ID: (
+                        "This needs to be name=value, not just the value — see "
+                        "the hint above."
+                    )
+                },
             }
 
         # The value passes through exactly once, from here into sqlite. Never
