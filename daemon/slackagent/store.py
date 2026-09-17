@@ -6,6 +6,7 @@ by the caller so the event loop never blocks on disk.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import time
@@ -119,6 +120,21 @@ CREATE TABLE IF NOT EXISTS mcp_tokens (
     refresh_token TEXT,
     expires_at    INTEGER,
     updated_at    INTEGER NOT NULL,
+    PRIMARY KEY (server, slack_user)
+);
+
+-- A header credential (e.g. syslog's Cookie) set via |mcp login, per (server,
+-- slack_user). Same reasoning as mcp_tokens: once one of these exists for a
+-- server, it is authoritative and the config file's copy of that header is never
+-- read again — the file only bootstraps. headers_json holds the whole overlay
+-- (usually one header) as JSON, since there is no fixed header name across
+-- servers worth a column of its own.
+CREATE TABLE IF NOT EXISTS mcp_header_overrides (
+    server       TEXT    NOT NULL,
+    slack_user   TEXT    NOT NULL DEFAULT '',
+    headers_json TEXT    NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    updated_by   TEXT    NOT NULL,
     PRIMARY KEY (server, slack_user)
 );
 
@@ -763,6 +779,62 @@ class Store:
                 ),
             )
             self._db.commit()
+
+    def mcp_header_override(
+        self, server: str, slack_user: str = ""
+    ) -> dict[str, str] | None:
+        """The header overlay set via |mcp login, or None if there is none.
+
+        NOT the whole answer to "what headers does this server send" — the
+        config file's headers are still the base; this is merged on top of them
+        in McpProxy._default_upstream, and wins once it exists.
+        """
+        row = self.mcp_header_override_row(server, slack_user)
+        return json.loads(row["headers_json"]) if row else None
+
+    def mcp_header_override_row(
+        self, server: str, slack_user: str = ""
+    ) -> sqlite3.Row | None:
+        """The raw row, for |mcp show to say who set it and when."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT * FROM mcp_header_overrides "
+                "WHERE server = ? AND slack_user = ?",
+                (server, slack_user),
+            ).fetchone()
+
+    def save_mcp_header_override(
+        self, server: str, slack_user: str, headers: dict[str, str], updated_by: str
+    ) -> None:
+        """Persist a credential pasted through |mcp login. The value passes
+        through exactly once, from the modal submission to this call — never
+        logged, never echoed back to Slack."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO mcp_header_overrides (server, slack_user, "
+                "headers_json, updated_at, updated_by) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(server, slack_user) DO UPDATE SET "
+                "headers_json = excluded.headers_json, "
+                "updated_at = excluded.updated_at, "
+                "updated_by = excluded.updated_by",
+                (
+                    server, slack_user, json.dumps(headers), int(time.time()),
+                    updated_by,
+                ),
+            )
+            self._db.commit()
+
+    def clear_mcp_header_override(self, server: str, slack_user: str = "") -> bool:
+        """True when a row was actually removed, so |mcp logout can say whether
+        anything changed."""
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM mcp_header_overrides "
+                "WHERE server = ? AND slack_user = ?",
+                (server, slack_user),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
 
     def add_mcp_policy(
         self, server: str, effect: str, pattern: str, created_by: str,

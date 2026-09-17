@@ -77,10 +77,14 @@ Create an app at <https://api.slack.com/apps>:
 
 - **Socket Mode**: on → gives you an app-level token (`xapp-…`)
 - **Bot token scopes**: `app_mentions:read`, `chat:write`, `channels:history`,
-  `groups:history`, `im:history`, `im:read`, `im:write`, `assistant:write`
+  `groups:history`, `im:history`, `im:read`, `im:write`, `assistant:write`,
+  `views:write`
   - `chat:write` also covers deleting the bot's own placeholder
   - the `*:history` scopes are what `conversations.replies` needs for the catch-up
     transcript; without them a tagged bot cannot see what it missed
+  - `views:write` is `|mcp login`'s modal (`views.open`) — nothing else in the
+    daemon opens one, so a workspace set up before that feature existed needs this
+    scope added and the app reinstalled, or the button silently fails
   - `users:read` and `reactions:*` are granted on the live app but deliberately
     **unused** — messages are labelled with Slack ids, not names, so no profile data
     leaves the workspace
@@ -478,6 +482,8 @@ itself, and it is never forwarded to Claude. Operator only.
 |mcp tools <server>   ask an upstream live; marks each tool allowed or blocked
 |mcp allow <s> <glob> permit a tool from the next message
 |mcp calls            the MCP audit trail
+|mcp login <server>   post a button; paste a fresh credential into a private modal
+|mcp logout <server>  drop a credential set with login, back to the config file's
 |silent               only answer in this thread when tagged
 |pause                answer nothing at all in this thread
 |resume               back to normal (lifts either one)

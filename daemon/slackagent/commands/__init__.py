@@ -100,6 +100,8 @@ class Context:
     # The MCP proxy, or None when no host-side MCP is configured. |mcp uses it to ask
     # an upstream what it offers, which the guest never gets to see unfiltered.
     mcp: Any = None
+    # |mcp login's button-and-modal flow. None wherever mcp is None too.
+    mcp_login: Any = None
 
 
 @dataclass(frozen=True)

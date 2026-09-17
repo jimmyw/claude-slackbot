@@ -660,8 +660,15 @@ class McpProxy:
             env = {"PATH": "/usr/local/bin:/usr/bin:/bin", **credential.env}
             return StdioUpstream(server, env)
         auth = OAuth(self._store, server.name, credential)
+        # A header pasted through |mcp login overlays the config file's copy, and
+        # wins once it exists — same split as OAuth's tokens: the file only
+        # bootstraps, the database is authoritative from the first login on.
+        headers = dict(credential.headers)
+        headers.update(
+            self._store.mcp_header_override(server.name, credential.owner) or {}
+        )
         return HttpUpstream(
-            server, credential.headers, auth=auth if auth.configured else None
+            server, headers, auth=auth if auth.configured else None
         )
 
 

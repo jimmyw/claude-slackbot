@@ -24,6 +24,7 @@ from .approvals import ACTION_ALWAYS, ACTION_APPROVE, ACTION_DENY, ApprovalServi
 from .bridge import Bridge
 from .config import Config, ConfigError
 from .mcpconfig import Registry, available_for
+from .mcp_login import ACTION_LOGIN_START, VIEW_LOGIN_MODAL, McpLoginService
 from .mcpproxy import McpProxy, RunContext
 from . import prompt as prompts
 from .render import SlackRenderer
@@ -59,6 +60,9 @@ class Daemon:
         self._mcp = Registry(config.mcp_config)
         self._mcp_proxy = McpProxy(
             config, self._store, self._mcp, self._run_context
+        )
+        self._mcp_login = McpLoginService(
+            config, self._store, self._mcp, self._app.client
         )
 
         # Learned from auth.test at startup. Four behaviours now depend on it: the
@@ -163,6 +167,16 @@ class Daemon:
         async def on_always(ack, body, action, respond):  # noqa: ANN001
             await ack()
             await self._approvals.handle_button(body, action, respond)
+
+        @app.action(ACTION_LOGIN_START)
+        async def on_mcp_login_start(ack, body, action):  # noqa: ANN001
+            await ack()
+            await self._mcp_login.handle_button(body, action)
+
+        @app.view(VIEW_LOGIN_MODAL)
+        async def on_mcp_login_submit(ack, body):  # noqa: ANN001
+            result = await self._mcp_login.handle_submit(body)
+            await ack(result)
 
     async def _on_message(self, event: dict, *, is_mention: bool) -> None:
         if event.get("bot_id") or event.get("subtype"):
@@ -486,7 +500,7 @@ class Daemon:
             channel=channel, thread_ts=thread_ts, message_ts=message_ts, user=user,
             is_operator=is_operator, config=self._config, store=self._store,
             vm=self._vm, bridge=self._bridge, approvals=self._approvals,
-            say=say, mcp=self._mcp_proxy,
+            say=say, mcp=self._mcp_proxy, mcp_login=self._mcp_login,
         )
         try:
             await commands.dispatch(ctx, stripped)

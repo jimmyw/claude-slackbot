@@ -27,6 +27,8 @@ what you allow here is the whole of what a compromised VM could do.
   {COMMAND_PREFIX}mcp disable <server>         stop offering it at all
   {COMMAND_PREFIX}mcp enable <server>          offer it again
   {COMMAND_PREFIX}mcp calls                    the audit trail, newest first
+  {COMMAND_PREFIX}mcp login <server>           post a button to paste a fresh credential
+  {COMMAND_PREFIX}mcp logout <server>          drop a credential set with `login`
 
 `allow` and `deny` take effect on the next message, like `{COMMAND_PREFIX}auth`. Add
 `--user <id>` to scope a rule to one person; without it the rule covers everyone. A
@@ -35,9 +37,17 @@ widen — and a deny beats every allow, wherever it came from.
 
 Adding a whole server is a block in the host config file: it is re-read when it
 changes, so a server added a minute ago is live on the next message.
+
+`login` only applies to a server whose credential is a plain HTTP header, not OAuth
+(which already refreshes itself) or a stdio server. The value goes into a Slack modal,
+never a message in this thread and never a log line, and overrides the config file's
+copy of that credential from the next call on.
 """
 
-_ACTIONS = ("show", "tools", "allow", "deny", "forget", "disable", "enable", "calls")
+_ACTIONS = (
+    "show", "tools", "allow", "deny", "forget", "disable", "enable", "calls",
+    "login", "logout",
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +89,10 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         await _forget(ctx, args)
     elif args.action in ("enable", "disable"):
         await _toggle(ctx, registry, args)
+    elif args.action == "login":
+        await _login(ctx, registry, args)
+    elif args.action == "logout":
+        await _logout(ctx, registry, args)
     else:
         await _calls(ctx, args)
 
@@ -134,6 +148,15 @@ async def _show(ctx: Context, registry) -> None:  # noqa: ANN001
             for d in ("allowed", "denied", "capped", "error")
             if (name, d) in activity
         ]
+        override_row = ctx.store.mcp_header_override_row(name)
+        override = (
+            f"\n    credential set via `{COMMAND_PREFIX}mcp login` by "
+            f"<@{override_row['updated_by']}> on "
+            f"{datetime.datetime.fromtimestamp(override_row['updated_at']):%m-%d}, "
+            "overriding the config file"
+            if override_row
+            else ""
+        )
         lines.append(
             f"\n  *{name}* ({server.type}) — {state}, {who}"
             f"\n    allow: {allowed}"
@@ -149,6 +172,7 @@ async def _show(ctx: Context, registry) -> None:  # noqa: ANN001
                 else ""
             )
             + (f"\n    7 days: {', '.join(counts)}" if counts else "")
+            + override
         )
 
         if server.mode == MODE_PER_USER:
@@ -272,6 +296,39 @@ async def _toggle(ctx: Context, registry, args) -> None:  # noqa: ANN001
         f":white_check_mark: `{server.name}` is {state}, from the next message."
         + ("" if enable else " A run already in flight keeps what it started with.")
     )
+
+
+async def _login(ctx: Context, registry, args) -> None:  # noqa: ANN001
+    from . import CommandError
+
+    if ctx.mcp_login is None:
+        raise CommandError("MCP login is not wired up on this daemon.")
+    server = _server_or_error(registry, args.target)
+    reason = await ctx.mcp_login.request(
+        ctx.channel, ctx.thread_ts, server.name, ctx.user
+    )
+    if reason:
+        raise CommandError(reason)
+    await ctx.say(
+        f"Posted a button above — click it to paste a fresh credential for "
+        f"`{server.name}`. It opens a Slack modal; the value never appears in "
+        "this thread or in a log."
+    )
+
+
+async def _logout(ctx: Context, registry, args) -> None:  # noqa: ANN001
+    server = _server_or_error(registry, args.target)
+    if ctx.store.clear_mcp_header_override(server.name):
+        await ctx.say(
+            f":white_check_mark: Dropped the credential set via "
+            f"`{COMMAND_PREFIX}mcp login` for `{server.name}`. It falls back to "
+            "the config file's copy, from the next call."
+        )
+    else:
+        await ctx.say(
+            f"`{server.name}` has no credential set via "
+            f"`{COMMAND_PREFIX}mcp login`. Nothing changed."
+        )
 
 
 async def _calls(ctx: Context, args) -> None:  # noqa: ANN001
