@@ -22,8 +22,8 @@ import tempfile
 from pathlib import Path
 
 from slackagent.config import Config
-from slackagent.mcpconfig import Credential, Registry
-from slackagent.mcpproxy import McpProxy, OAuth, RunContext
+from slackagent.mcpconfig import Credential, Registry, Server
+from slackagent.mcpproxy import HttpUpstream, McpProxy, OAuth, RunContext, _unwrap_tools
 from slackagent.store import Store
 
 REPO = Path(__file__).resolve().parents[2]
@@ -519,6 +519,91 @@ async def test_command() -> None:
                   "syslog" in errors[0], errors[0])
 
 
+class FakeHttpResponse:
+    """A response that fails `raise_for_status` at a fixed status, like a stale cookie."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.headers: dict[str, str] = {}
+
+    def raise_for_status(self) -> None:
+        if self.status >= 400:
+            raise RuntimeError(
+                f"{self.status}, message='Unauthorized', url='http://fake/mcp'"
+            )
+
+    async def json(self):  # noqa: ANN201
+        return {}
+
+    async def release(self) -> None:
+        return None
+
+    async def __aenter__(self) -> "FakeHttpResponse":
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+
+class FakeHttpSession:
+    """An upstream that answers every POST with a fixed status, e.g. a stale cookie."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    def post(self, url, json=None, headers=None):  # noqa: ANN001, ARG002
+        return FakeHttpResponse(self.status)
+
+    async def close(self) -> None:
+        return None
+
+
+async def test_upstream_failures() -> None:
+    print("\n[7] a broken upstream is distinguishable from a genuinely empty one")
+
+    check("a normal reply yields its tools",
+          _unwrap_tools("s", {"result": {"tools": [{"name": "x"}]}})
+          == [{"name": "x"}])
+    check("a genuinely empty reply yields an empty list, not an error",
+          _unwrap_tools("s", {"result": {"tools": []}}) == [])
+
+    raised = ""
+    try:
+        _unwrap_tools("s", {"error": {"message": "boom"}})
+    except RuntimeError as exc:
+        raised = str(exc)
+    check("a JSON-RPC error raises instead of reading as zero tools",
+          raised == "boom", raised)
+
+    raised = ""
+    try:
+        _unwrap_tools("s", {"result": {"isError": True, "content": [
+            {"type": "text", "text": "401 unauthorized"}]}})
+    except RuntimeError as exc:
+        raised = str(exc)
+    check("an isError tool-result raises too, with its text",
+          raised == "401 unauthorized", raised)
+
+    server = Server(name="syslog", type="http", url="http://fake/mcp")
+    upstream = HttpUpstream(server, {}, session=FakeHttpSession(401))
+    await upstream.start()
+
+    await upstream.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    reply = await upstream.receive()
+    check("a failed tools/list surfaces as a JSON-RPC error to the guest — not a "
+          "tool result that quietly reads as zero tools",
+          "error" in reply and "401" in reply["error"]["message"], reply)
+
+    await upstream.send({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                          "params": {"name": "query_logs"}})
+    reply = await upstream.receive()
+    check("a failed tools/call still comes back as a tool error the agent can read",
+          reply["result"]["isError"] is True
+          and "401" in reply["result"]["content"][0]["text"], reply)
+
+    await upstream.close()
+
+
 async def main() -> int:
     check("the relay script is executable and root-installable",
           RELAY.exists() and bool(RELAY.stat().st_mode & stat.S_IXUSR), RELAY)
@@ -528,6 +613,7 @@ async def main() -> int:
     await test_runtime_policy()
     await test_oauth()
     await test_command()
+    await test_upstream_failures()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")

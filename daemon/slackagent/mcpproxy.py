@@ -106,6 +106,27 @@ def protocol_error(request_id: Any, message: str, code: int = -32601) -> dict:
     }
 
 
+def _unwrap_tools(server_name: str, reply: dict | None) -> list[dict]:
+    """The tools from a `tools/list` reply, or raise if the upstream failed.
+
+    A failed call comes back as either a JSON-RPC error or a `tool_error`-shaped
+    result (`isError`) — both read as `{}` under `.get("tools")`, indistinguishable
+    from an upstream that genuinely offers nothing. Raising here is what lets
+    `|mcp tools` report "the call failed" instead of "reported no tools at all".
+    """
+    reply = reply or {}
+    error = reply.get("error")
+    if error:
+        raise RuntimeError(error.get("message") or f"{server_name} returned an error")
+    result = reply.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(
+            c.get("text", "") for c in result.get("content") or [] if isinstance(c, dict)
+        )
+        raise RuntimeError(text or f"{server_name} returned an error")
+    return list(result.get("tools") or [])
+
+
 # -- upstreams ---------------------------------------------------------------
 
 
@@ -355,9 +376,25 @@ class HttpUpstream(Upstream):
         except Exception as exc:  # noqa: BLE001
             log.warning("mcp[%s] upstream POST failed: %s", self._server.name, exc)
             request_id = message.get("id")
-            if request_id is not None:
+            if request_id is None:
+                return
+            if message.get("method") == "tools/call":
                 await self._queue.put(
                     tool_error(request_id, f"the upstream MCP server failed: {exc}")
+                )
+            else:
+                # initialize / tools/list / anything else that isn't a tool call: a
+                # genuine protocol-level failure, not a tool refusal. A tool_error
+                # here would either read to the CLI as a broken tool result for a
+                # method that has none, or — for tools/list — collapse to an empty
+                # `result.tools`, indistinguishable from an upstream that genuinely
+                # offers nothing. A JSON-RPC error says the server itself is broken.
+                await self._queue.put(
+                    protocol_error(
+                        request_id,
+                        f"{self._server.name} upstream failed: {exc}",
+                        code=-32000,
+                    )
                 )
 
     async def _post(self, message: dict, *, retry_auth: bool = True) -> None:
@@ -510,7 +547,7 @@ class McpProxy:
             await upstream.send({"jsonrpc": "2.0", "method": "notifications/initialized"})
             await upstream.send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
             reply = await asyncio.wait_for(upstream.receive(), timeout=20)
-            return list(((reply or {}).get("result") or {}).get("tools") or [])
+            return _unwrap_tools(server.name, reply)
         finally:
             await upstream.close()
 
