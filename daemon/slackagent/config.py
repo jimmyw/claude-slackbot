@@ -65,6 +65,16 @@ class Config:
     # Rendering
     update_interval_s: float
 
+    # Additional users who may press Approve/Deny — the approver role, one level
+    # below the operator: they decide tool calls (including "Always allow", which
+    # creates a standing grant), but they run no `|` command and get no DMs.
+    #
+    # This is the SEED for the runtime list that `|approvers` manages, and the two
+    # are unioned rather than overridden: an id here is a floor, removable only by
+    # editing .env and restarting. Empty by default, which is exactly the old
+    # behaviour — the operator alone.
+    approvers: frozenset[str] = frozenset()
+
     extra_system_prompt: str = field(default="")
 
     # Whether the first mention in a thread the bot has never spoken in brings that
@@ -131,6 +141,13 @@ class Config:
                 )
             ).expanduser(),
             update_interval_s=float(os.environ.get("UPDATE_INTERVAL_S", "1.2")),
+            # Parsed exactly like ALLOWED_USERS, and deliberately not defaulted to
+            # anything: a wider approver set has to be asked for.
+            approvers=frozenset(
+                u.strip()
+                for u in os.environ.get("APPROVERS", "").split(",")
+                if u.strip()
+            ),
             extra_system_prompt=os.environ.get("EXTRA_SYSTEM_PROMPT", ""),
             # On unless explicitly disabled, unlike FORWARD_AGENT: this grants
             # nothing the bot cannot already read the moment it is tagged, it only
@@ -187,6 +204,16 @@ class Config:
                 f"AUTHORIZED_USER_ID should be a Slack user ID like U012ABCDEF, "
                 f"got {self.authorized_user!r}"
             )
+        # A typo here is silent otherwise: a malformed id simply never matches, so
+        # the person it was meant to name clicks Approve and is refused, and the
+        # only clue is a log line about an "unauthorized user".
+        bad = sorted(u for u in self.approvers if not u.startswith(("U", "W")))
+        if bad:
+            raise ConfigError(
+                "APPROVERS must be Slack user IDs like U012ABCDEF, got "
+                + ", ".join(repr(u) for u in bad)
+            )
+
         if self.approval_timeout_s >= 850:
             # settings.json pins the hook timeout at 900s. The approval window
             # has to close first, or the harness kills the hook before Slack can

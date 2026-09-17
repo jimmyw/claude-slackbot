@@ -161,6 +161,23 @@ CREATE TABLE IF NOT EXISTS grants (
     last_used_at INTEGER,
     UNIQUE (tool_name, pattern, match_type)
 );
+
+-- Users who may resolve an approval besides AUTHORIZED_USER_ID: the approver
+-- role. Runtime, so adding a colleague is a Slack message rather than an .env
+-- edit and a restart.
+--
+-- A NEW table needs no migration, unlike a new column: SCHEMA runs on every open
+-- and CREATE TABLE IF NOT EXISTS does create one that is absent. It is also why
+-- this is not a column on anything — there is no per-user row to hang it off.
+--
+-- The APPROVERS seed in .env is NOT copied in here. It is unioned at check time
+-- (see roles.py), so a seeded id cannot be silently dropped by a DELETE here, and
+-- an empty table plus an empty seed is the old operator-only behaviour exactly.
+CREATE TABLE IF NOT EXISTS approvers (
+    slack_user TEXT PRIMARY KEY,
+    added_at   INTEGER NOT NULL,
+    added_by   TEXT
+);
 """
 
 
@@ -545,6 +562,45 @@ class Store:
                 "SELECT updated_at, updated_by FROM settings WHERE key = ?", (key,)
             ).fetchone()
         return (int(row["updated_at"]), row["updated_by"] or "") if row else None
+
+    # -- approvers ----------------------------------------------------------
+
+    def approvers(self) -> set[str]:
+        """The runtime approver list. NOT the whole answer to "who may approve" —
+        the operator and the .env seed are added by roles.deciders."""
+        with self._lock:
+            return {
+                row["slack_user"]
+                for row in self._db.execute("SELECT slack_user FROM approvers")
+            }
+
+    def approver_entries(self) -> list[sqlite3.Row]:
+        """Who was added, by whom, when — for `|approvers` to show."""
+        with self._lock:
+            return self._db.execute(
+                "SELECT slack_user, added_at, added_by FROM approvers "
+                "ORDER BY added_at"
+            ).fetchall()
+
+    def add_approver(self, slack_user: str, added_by: str) -> bool:
+        """Add one. False when they were already on the list, so the command can
+        say "already there" rather than reporting a change that did not happen."""
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO approvers (slack_user, added_at, added_by) "
+                "VALUES (?, ?, ?)",
+                (slack_user, int(time.time()), added_by),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    def remove_approver(self, slack_user: str) -> bool:
+        with self._lock:
+            cursor = self._db.execute(
+                "DELETE FROM approvers WHERE slack_user = ?", (slack_user,)
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
 
     # -- grants -------------------------------------------------------------
 

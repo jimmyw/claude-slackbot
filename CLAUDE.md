@@ -108,6 +108,19 @@ sessions.
   was in getting an ssh session, not in git. Root cause unconfirmed; the retry
   storm above then sustained it for several minutes.
 
+- **A running daemon picks up a new command FILE without its code.** Commands are
+  discovered with `pkgutil.iter_modules` at the first `|` message and cached, so
+  dropping `commands/approvers.py` into the tree made the live process — started
+  before the change — import it and run it against the old `Config`:
+  `AttributeError: 'Config' object has no attribute 'approvers'`, reported in Slack
+  as a bare "That command failed". Nothing was broken, and a restart fixed it, but
+  the window exists for as long as the files are edited in place under the unit's
+  `WorkingDirectory`. Restart before trying a new command, not after.
+- **There are two `.env` files and only one is read.** The unit's `EnvironmentFile`
+  is `daemon/.env`; `/home/example/slackbot/.env` is an older copy that nothing
+  loads. They currently agree on `AUTHORIZED_USER_ID` and `DB_PATH`, which is the
+  only reason editing the wrong one has not yet cost anything.
+
 ## Database migrations
 
 - **`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists**, so
@@ -166,6 +179,9 @@ One module per command in `slackagent/commands/`, discovered with
   allowed or blocked), and changes policy at runtime. It never prints a credential.
 - **`|silent`, `|pause` and `|resume` set a per-thread mode** — see "Three thread
   modes" above.
+- **`|approvers`** manages who may press Approve/Deny — see "Three approval roles".
+  Operator-only like the rest, and it is the one command whose effect is visible to
+  people who cannot run any command.
 - A **new table** needs no migration, unlike a new column: `SCHEMA` runs on every
   open and `CREATE TABLE IF NOT EXISTS` does create one that is absent. That is why
   the mode lives in its own table rather than as a column on `threads` — and it
@@ -438,9 +454,9 @@ Per thread, in `thread_modes`: `active` (default), `silent` (`|silent`), `paused
 ## Who can do what
 
 - **Requesting and approving are separate roles.** Anyone in a channel the bot is
-  invited to may talk to it; only `AUTHORIZED_USER_ID` may press Approve/Deny or
-  run `revoke`. Their approval message is labelled `requested by @them`, and
-  `approvals` records `requested_by` alongside `resolved_by`.
+  invited to may talk to it; only an *approver* may press Approve/Deny, and only the
+  operator may run `revoke`. Their approval message is labelled `requested by @them`,
+  and `approvals` records `requested_by` alongside `resolved_by`.
 - **DMs remain operator-only** on purpose: any workspace member can open a DM, so
   guest DMs would widen the audience from "people invited to a channel" to "the
   whole workspace".
@@ -452,6 +468,44 @@ Per thread, in `thread_modes`: `active` (default), `silent` (`|silent`), `paused
   been done.
 - Guests can also spend API budget, and a long thread costs more per turn (see the
   cache note above). There is no per-user rate limit.
+
+## Three approval roles
+
+`operator` (`AUTHORIZED_USER_ID`) → `approver` (`APPROVERS` + `|approvers`) → guest.
+`slackagent/roles.py` is the whole rule; the middle level is the only new one.
+
+- **An approver decides, and does nothing else.** Approve, Deny and *Always allow* on
+  a tool call — no `|` command, no DM, no `revoke`, and no capability of their own.
+  They are not on `ALLOWED_USERS` implicitly either, so an approver can be someone who
+  may answer for the agent but never drive it; `|approvers` warns when that is the
+  case, because from Slack it looks like a broken bot rather than a policy.
+- **The operator is a LEVEL, not a row.** `deciders()` always contains it, so a
+  database with no `approvers` rows and an empty `APPROVERS` behaves exactly as the
+  daemon did before the role existed — which is what makes the change deployable
+  without touching `.env`. `|approvers remove` on the operator is refused rather than
+  deleting a row that was never there.
+- **The `.env` seed and the runtime list are unioned, never overridden** — the same
+  rule `|mcp` learned the hard way, where a per-user list that replaced the configured
+  one silently revoked everything it did not repeat. Here that would mean one
+  `|approvers add` quietly dropping three seeded ids. The cost is that a seeded id
+  cannot be removed from Slack, and `|approvers remove` says so instead of deleting
+  nothing and reporting success.
+- **The decider set is read per click, not per run.** The case that actually happens
+  is someone being added *because* an approval is already sitting in a thread, so
+  caching it at run registration would make the obvious fix not work. `test_approvers`
+  pins that: refused, added mid-wait, then the same approval answered.
+- **"Always allow" is the real widening.** An approver cannot revoke, but they can
+  create a standing grant, which then answers for everyone — including the operator's
+  own runs. `grants.created_by` was always recorded; `|grants` now shows it, because
+  "who widened this" only became answerable-in-Slack once more than one person could.
+- **An id is validated on the way in, in two places.** `Config.validate` rejects an
+  `APPROVERS` entry that is not a Slack id, and `|approvers` rejects one that is not a
+  mention or a bare id (real ids are uppercase alphanumerics, no underscore — the test
+  fixtures had to change to match). A typo is otherwise silent: it never matches, so
+  the person clicks Approve and the only trace is a log line calling them
+  unauthorized.
+- The refusal text still names the operator — a guest needs to know who to ask, and
+  listing every approver in a public refusal would ping them all on every stray click.
 
 ## Bash policy (permissive)
 

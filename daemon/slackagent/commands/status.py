@@ -4,12 +4,13 @@ from __future__ import annotations
 import argparse
 import datetime
 
+from .. import roles
 from ..store import MODE_PAUSED, MODE_SILENT
 from . import COMMAND_PREFIX, Context, SlackParser
 
 NAME = "status"
 ALIASES = ()
-SUMMARY = "VM state, SSH bridge, grant count"
+SUMMARY = "VM state, SSH bridge, grants, approvers"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -17,8 +18,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog=f"{COMMAND_PREFIX}{NAME}",
         description=(
             "Report whether the agent VM is running, whether the SSH bridge "
-            "answers, and how many standing grants exist. Costs nothing: no "
-            "Claude turn is started."
+            "answers, how many standing grants exist and how many people can "
+            "approve. Costs nothing: no Claude turn is started."
         ),
     )
 
@@ -35,6 +36,7 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
     mcp_servers = sorted(registry.servers()) if registry is not None else []
     mcp_disabled = ctx.store.mcp_disabled() if mcp_servers else set()
     policy = ctx.store.get_setting("agent_policy", ctx.config.agent_policy)
+    deciders = roles.load(ctx.config, ctx.store)
     # Reported because a paused thread is silent by design, which is otherwise
     # indistinguishable from a broken one — and |status is where you look.
     here = ctx.store.thread_mode_entry(ctx.channel, ctx.thread_ts)
@@ -50,6 +52,13 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         + (" — :warning: approvals disabled" if policy == "open" else "")
         + f" (`{COMMAND_PREFIX}auth` to change)\n"
         f"Standing grants: {len(grants)} (`{COMMAND_PREFIX}grants` to list)\n"
+        + (
+            f"Approvers: <@{ctx.config.authorized_user}> only "
+            f"(`{COMMAND_PREFIX}approvers add @person` to widen it)\n"
+            if len(deciders) == 1
+            else f"Approvers: {len(deciders)} people can decide "
+                 f"(`{COMMAND_PREFIX}approvers` to list)\n"
+        )
         + (
             f"MCP: {len(mcp_servers) - len(mcp_disabled)} of {len(mcp_servers)} "
             f"server(s) offered, credentials on the host "

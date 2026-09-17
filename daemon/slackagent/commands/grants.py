@@ -13,7 +13,8 @@ _DESCRIPTION = """\
 List the standing grants. A grant lets matching tool calls run without a button.
 
 Grants are created by pressing "Always allow" on an approval, and are stored on
-the host, so the agent can never grant itself anything.
+the host, so the agent can never grant itself anything. Any approver can press it
+(see |approvers); only the operator can revoke.
 
 Match types:
   prefix   a command and optional subcommand: `git status` covers
@@ -72,7 +73,10 @@ async def run(ctx: Context, args: argparse.Namespace) -> None:
         else:
             scope = f"`{g.pattern}` and below"
         used = f"{g.use_count} use{'s' if g.use_count != 1 else ''}"
-        lines.append(f"  `{g.id}`  {g.tool_name}: {scope}  ({used})")
+        # Who created it matters now that more than one person can: an approver
+        # pressing "Always allow" changes what runs unattended for everyone.
+        by = f" by <@{g.created_by}>" if g.created_by else ""
+        lines.append(f"  `{g.id}`  {g.tool_name}: {scope}  ({used}{by})")
     lines.append(
         f"`{COMMAND_PREFIX}revoke <id>` to remove one, "
         f"`{COMMAND_PREFIX}revoke all` to clear them."

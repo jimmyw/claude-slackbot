@@ -29,12 +29,19 @@ Restart=always
 RestartSec=5
 
 # The daemon holds the Slack token and the VM key. It has no reason to write
-# anywhere but its own state directory.
+# anywhere but its own state directory -- plus the config directories of the
+# stdio MCP servers it spawns, which inherit this mount namespace. The homevolt
+# server caches scraped PFM action ids in ~/.config/example-homevolt/actions.json
+# and died on [Errno 30] without this: read-only was enough to LOAD its session,
+# so the failure only appeared on the first call that needed action discovery.
+# Note this class of bug is invisible outside the unit -- reproduce it with
+# `systemd-run --user -p ProtectHome=read-only ...`, not from a shell.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/example/.local/share/slack-claude
+ReadWritePaths=/home/example/.config/example-homevolt
 
 # /var/log/journal is root:systemd-journal and example is not in that group, so
 # `journalctl --user` cannot read anything on this host. Log to a file the owner

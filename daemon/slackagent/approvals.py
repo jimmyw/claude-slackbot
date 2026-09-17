@@ -7,9 +7,11 @@ closes.
 
 Two rules this module exists to enforce:
 
-  1. Only AUTHORIZED_USER_ID can decide. Channel membership is not an access
-     control; anyone in the channel can see the buttons and click them. The
-     user-ID check on the button payload is the only thing that actually gates.
+  1. Only an APPROVER can decide — the operator, plus anyone in APPROVERS or added
+     with `|approvers` (see roles.py). Channel membership is not an access control;
+     anyone in the channel can see the buttons and click them. The user-ID check on
+     the button payload is the only thing that actually gates, and the set it
+     checks against is read from the host's database, never from the payload.
 
   2. Timeout means deny. If nobody answers, the tool call does not happen.
 """
@@ -26,6 +28,7 @@ from aiohttp import web
 
 from .config import Config
 from .grants import MATCH_ANY, MATCH_EXACT, suggest
+from .roles import load as load_deciders
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -304,7 +307,14 @@ class ApprovalService:
         approve = action_id in (ACTION_APPROVE, ACTION_ALWAYS)
 
         # THE access control. Everything else in this file is bookkeeping.
-        if clicker != self._config.authorized_user:
+        #
+        # Read per click, not cached: `|approvers add` has to take effect on the
+        # approval already sitting in the thread — the case that actually happens is
+        # someone being added *because* something is waiting for them.
+        deciders = await asyncio.to_thread(
+            load_deciders, self._config, self._store
+        )
+        if clicker not in deciders:
             log.warning(
                 "rejected approval click from unauthorized user %s", clicker
             )
@@ -318,9 +328,14 @@ class ApprovalService:
                     # channel member could trigger by clicking.
                     "replace_original": False,
                     "text": (
-                        f":no_entry: Only <@{self._config.authorized_user}> can "
-                        "approve or deny tool calls. Your request is still "
-                        "pending — they will see it in this thread."
+                        f":no_entry: Only <@{self._config.authorized_user}>"
+                        + (
+                            " and this agent's approvers"
+                            if len(deciders) > 1
+                            else ""
+                        )
+                        + " can approve or deny tool calls. Your request is "
+                        "still pending — they will see it in this thread."
                     ),
                 }
             )

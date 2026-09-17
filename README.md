@@ -339,11 +339,35 @@ its `CLAUDE.md` tells it not to waste a gated call trying.
 
 ### Who can do what
 
-| | talk to it | approve | manage grants |
-|---|---|---|---|
-| `AUTHORIZED_USER_ID` | yes, channels and DM | **yes** | yes |
-| anyone in a channel it's invited to | yes | no | no |
-| anyone else | no | no | no |
+| | talk to it | approve | manage grants | `\|` commands |
+|---|---|---|---|---|
+| `AUTHORIZED_USER_ID` — the operator | yes, channels and DM | **yes** | yes | yes |
+| an approver (`APPROVERS`, `\|approvers`) | as a guest | **yes** | may *create*, not revoke | no |
+| anyone in a channel it's invited to | yes | no | no | no |
+| anyone else | no | no | no | no |
+
+**Three levels, and only the middle one is new.** With no `APPROVERS` and an empty
+`|approvers` list — the default — the operator is the only person who can decide
+anything, exactly as before. `|approvers add @person` adds someone at the approver
+level: they can press Approve, Deny and *Always allow* on a tool call, and nothing
+else. No `|` commands, no DMs, no `|revoke`, and no access of their own — an approver
+decides what the *agent* may do, they never gain a capability themselves.
+
+*Always allow* is the part to think about before adding someone: it creates a
+standing grant, so an approver can widen what runs unattended for everyone
+afterwards. `|grants` names who created each one; revoking stays with the operator.
+
+`APPROVERS` in `.env` and the runtime `|approvers` list are **unioned**, never
+overridden — the same rule `|mcp` learned the hard way, where a runtime list that
+replaced the configured one silently revoked everything it did not repeat. So an id
+in the file is a floor: `|approvers remove` refuses it out loud and tells you to edit
+the file, rather than deleting nothing and reporting success. Put long-term approvers
+in `.env` (they survive a lost database) and add the rest from Slack (you can take
+those back without a restart).
+
+A change is live for an approval **already waiting** in a thread: the decider set is
+read on each click, not cached per run, because "add them because something is
+blocked on them" is the case that actually happens.
 
 **Anyone in a channel the bot is invited to can talk to it** — the invite is the
 grant. Their requests run, and anything not pre-approved asks *you*, labelled
@@ -371,9 +395,11 @@ history of a thread it is tagged into, said before anyone knew it would be. Boun
 but a real widening of what leaves the workspace; `CATCH_UP_NEW_THREADS=0` narrows it
 back to what was said after the tag. No names or profile data go with them.
 
-**Only `AUTHORIZED_USER_ID` can decide.** Anyone in the channel can see the
-buttons; a click from anyone else gets an ephemeral refusal naming the operator and
-leaves the request pending.
+**Only an approver can decide.** Anyone in the channel can see the buttons; a click
+from anyone else gets an ephemeral refusal naming the operator and leaves the request
+pending. The set of people who may click is read from the host's database on every
+click — the button payload says who clicked, and nothing in it says whether they are
+allowed to.
 
 > A reply to a Slack button's `response_url` **replaces the original message
 > unless you pass `replace_original: False`**. Without it, an unauthorized click
@@ -444,7 +470,10 @@ itself, and it is never forwarded to Claude. Operator only.
 
 ```
 |help                 list the commands, with a one-line description each
-|status               VM state, SSH bridge, policy, grants, MCP, this thread's mode
+|status               VM state, SSH bridge, policy, grants, approvers, MCP, mode
+|approvers            who may press Approve/Deny, and where each one comes from
+|approvers add @x     let them decide tool calls (not | commands, not DMs)
+|approvers remove @x  take it back
 |mcp                  MCP servers, who may call what, recent calls
 |mcp tools <server>   ask an upstream live; marks each tool allowed or blocked
 |mcp allow <s> <glob> permit a tool from the next message
