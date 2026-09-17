@@ -297,7 +297,58 @@ class Daemon:
 
     # -- the turn -----------------------------------------------------------
 
+    _WATCHING_REACTION = "eyes"
+
+    async def _add_watching(self, channel: str, message_ts: str) -> None:
+        """A visible "I've seen this" that doesn't depend on posting a reply —
+        the placeholder text below only appears for addressed turns, and even
+        then only after a Slack round trip, so people were left unsure whether
+        an unaddressed or slow-starting message had registered at all."""
+        if not message_ts:
+            return
+        try:
+            await self._app.client.reactions_add(
+                channel=channel, timestamp=message_ts, name=self._WATCHING_REACTION
+            )
+        except Exception:
+            # Never worth failing a turn over — a missing reaction is a cosmetic
+            # gap, not a reason to stop answering. Common cause: the message was
+            # already reacted to (e.g. a retry), which Slack refuses as
+            # already_reacted.
+            log.debug("could not add the watching reaction", exc_info=True)
+
+    async def _remove_watching(self, channel: str, message_ts: str) -> None:
+        """Removed unconditionally — reply, no-reply, or error — so "eyes" always
+        means "still working" and never lingers as a stale signal."""
+        if not message_ts:
+            return
+        try:
+            await self._app.client.reactions_remove(
+                channel=channel, timestamp=message_ts, name=self._WATCHING_REACTION
+            )
+        except Exception:
+            log.debug("could not remove the watching reaction", exc_info=True)
+
     async def _run_turn(
+        self,
+        channel: str,
+        thread_ts: str,
+        prompt: str,
+        requested_by: str = "",
+        *,
+        addressed: bool = True,
+        message_ts: str = "",
+    ) -> None:
+        await self._add_watching(channel, message_ts)
+        try:
+            await self._run_turn_inner(
+                channel, thread_ts, prompt, requested_by,
+                addressed=addressed, message_ts=message_ts,
+            )
+        finally:
+            await self._remove_watching(channel, message_ts)
+
+    async def _run_turn_inner(
         self,
         channel: str,
         thread_ts: str,
