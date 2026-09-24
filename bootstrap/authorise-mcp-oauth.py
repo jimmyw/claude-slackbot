@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import hashlib
 import http.server
 import json
@@ -206,7 +207,20 @@ def await_redirect(port: int, timeout: int) -> dict:
     runs on, and telling someone to set up a port forward before they can fix a
     logged-out server is how a fix goes unused.
     """
-    httpd = http.server.HTTPServer(("127.0.0.1", port), _Catcher)
+    try:
+        httpd = http.server.HTTPServer(("127.0.0.1", port), _Catcher)
+    except OSError as exc:
+        # Almost always an earlier run of this script still sitting in its own
+        # 300s wait, which is easy to do: the authorisation is finished in a
+        # browser, so the terminal it started in is not the one you are looking at.
+        die(
+            f"cannot listen on 127.0.0.1:{port}: {exc}.\n"
+            "  An earlier run is probably still waiting for its redirect — check\n"
+            "  with `pgrep -af authorise-mcp-oauth`, and either finish that one or\n"
+            f"  kill it. Otherwise pick another port with --port. Note the grant may\n"
+            "  ALREADY be in place: a completed run leaves no mcp_tokens row for the\n"
+            "  server, so `|mcp tools <server>` is the quickest way to tell."
+        )
     httpd.timeout = 1
     _Catcher.result = {}
 
@@ -337,6 +351,13 @@ def main() -> None:
         help="do NOT delete the shadowing token / header-override rows",
     )
     args = parser.parse_args()
+
+    # Without a TTY Python block-buffers stdout, so run over `ssh host "..."` — the
+    # natural one-liner, since the port forward has to exist before the script does
+    # — printed nothing at all until it exited, authorize URL included. The whole
+    # middle of this script is a prompt asking someone to go and do something.
+    with contextlib.suppress(Exception):
+        sys.stdout.reconfigure(line_buffering=True)
 
     if not args.config.exists():
         die(f"{args.config} does not exist")
