@@ -14,6 +14,7 @@ Run:  .venv/bin/python -m tests.test_mcpproxy
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import stat
@@ -23,7 +24,15 @@ from pathlib import Path
 
 from slackagent.config import Config
 from slackagent.mcpconfig import Credential, Registry, Server
-from slackagent.mcpproxy import HttpUpstream, McpProxy, OAuth, RunContext, _unwrap_tools
+from slackagent.mcpproxy import (
+    HttpUpstream,
+    McpProxy,
+    OAuth,
+    RunContext,
+    _failure_text,
+    _unwrap_tools,
+    upstream_failure_text,
+)
 from slackagent.store import Store
 
 REPO = Path(__file__).resolve().parents[2]
@@ -133,6 +142,30 @@ class Harness:
     def calls(self) -> list[str]:
         path = self.tmp / "calls.txt"
         return path.read_text().split() if path.exists() else []
+
+
+@contextlib.asynccontextmanager
+async def relay_for(harness: "Harness", server: str):
+    """A relay that is always torn down, even when a check raises.
+
+    Without the finally, a timed-out rpc leaves the relay connected, the proxy's
+    session still pumping, and `server.wait_closed()` in Harness.__aexit__ waits
+    for it for ever — so a failing assertion presents as a hung test run rather
+    than as a failure.
+    """
+    relay = await harness.relay(server)
+    try:
+        yield relay
+    finally:
+        if relay.returncode is None:
+            with contextlib.suppress(Exception):
+                relay.stdin.close()
+            try:
+                await asyncio.wait_for(relay.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: B014
+                with contextlib.suppress(ProcessLookupError):
+                    relay.kill()
+                    await relay.wait()
 
 
 async def rpc(process, message: dict, timeout: float = 20.0) -> dict:
@@ -431,6 +464,38 @@ async def test_oauth() -> None:
               "re-authorise" in raised, raised)
         check("a server with no oauth block does not claim to be configured",
               not OAuth(store, "x", Credential()).configured)
+
+        print("\n[5c] the RFC 8707 resource indicator survives a refresh")
+        bound = FakeTokenEndpoint()
+        await OAuth(
+            store,
+            "syslog",
+            Credential(
+                oauth={"token_url": "https://syslog.example/token",
+                       "client_id": "cid", "refresh_token": "boot",
+                       "resource": "https://syslog.example/mcp"},
+                owner=OPERATOR,
+            ),
+            session=bound,
+        ).header()
+        check("a grant authorised with a resource refreshes with one — without it an "
+              "audience-bound server hands back a token its own API then 401s",
+              bound.calls[0].get("resource") == "https://syslog.example/mcp",
+              bound.calls[0])
+        check("and no scope is invented when the server advertises none",
+              "scope" not in bound.calls[0], bound.calls[0])
+
+        plain = FakeTokenEndpoint()
+        await OAuth(
+            store, "esp-crash",
+            Credential(oauth={"token_url": "https://auth.example/token",
+                              "client_id": "cid", "refresh_token": "boot"},
+                       owner="someone-else"),
+            session=plain,
+        ).header()
+        check("a grant obtained without one does not start sending it — the migrated "
+              "grants must keep refreshing exactly as they did",
+              "resource" not in plain.calls[0], plain.calls[0])
         store.close()
 
 
@@ -600,8 +665,144 @@ async def test_upstream_failures() -> None:
     check("a failed tools/call still comes back as a tool error the agent can read",
           reply["result"]["isError"] is True
           and "401" in reply["result"]["content"][0]["text"], reply)
+    text = reply["result"]["content"][0]["text"]
+    check("and it names the server and says the credential expired, so the agent "
+          "reports that instead of retrying a call that cannot work",
+          "syslog" in text and "logged out" in text and "operator" in text, text)
+
+    check("a failure with no auth smell is not mislabelled as a login problem",
+          "logged out" not in upstream_failure_text("varys", "connection reset"),
+          upstream_failure_text("varys", "connection reset"))
+
+    check("a JSON-RPC error is recognised as a failure",
+          _failure_text({"error": {"message": "boom"}}) == "boom")
+    check("so is an isError tool result — the shape a logged-out upstream uses, and "
+          "the one that reads as success to anything checking only for `error`",
+          _failure_text({"result": {"isError": True, "content": [
+              {"type": "text", "text": "401"}]}}) == "401")
+    check("and a good result is not",
+          _failure_text({"result": {"content": []}}) == "")
 
     await upstream.close()
+
+
+def failing_document(tmp: Path, mode: str, call: str = "") -> dict:
+    """The same syslog server, with its upstream refusing to list its tools."""
+    doc = document(tmp)
+    env = doc["servers"]["syslog"]["credential"]["env"]
+    env["FAKE_TOOLS_LIST"] = mode
+    if call:
+        env["FAKE_TOOLS_CALL"] = call
+    return doc
+
+
+async def test_tool_cache() -> None:
+    """A server whose tools/list fails must not VANISH.
+
+    The failure being fixed: a failed tools/list reached the CLI as a JSON-RPC
+    error, the CLI dropped the server, and the agent's context then contained no
+    such MCP server at all — so it reported the capability as non-existent rather
+    than broken, and planned around its absence instead of saying "linear is
+    logged out".
+    """
+    print("\n[8] a failing upstream keeps its tools, and fails at the call")
+    from slackagent import mcpproxy
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+
+        async with Harness(tmp, document(tmp / "c"), name="c") as h:
+            async with relay_for(h, "syslog") as relay:
+                await rpc(relay, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                  "params": {}})
+                first = await rpc(relay, {"jsonrpc": "2.0", "id": 2,
+                                          "method": "tools/list", "params": {}})
+                check("a healthy first page still paginates",
+                      first["result"].get("nextCursor") == "page-2", first["result"])
+                await rpc(relay, {"jsonrpc": "2.0", "id": 3, "method": "tools/list",
+                                  "params": {"cursor": "page-2"}})
+
+        cached, seen_at = Store(tmp / "c" / "state.sqlite3"), None
+        tools, seen_at = cached.mcp_tools("syslog")
+        check("the whole paginated list is cached, not just one page — caching a "
+              "single page would silently shrink the toolset",
+              sorted(t["name"] for t in tools)
+              == ["get_stats", "pulse_reboot", "query_logs"], tools)
+        check("the UNFILTERED list is what is stored, so the live policy filter "
+              "still applies while the upstream is down",
+              any(t["name"] == "pulse_reboot" for t in tools), tools)
+        check("and it is timestamped", seen_at > 0, seen_at)
+        cached.close()
+
+        # A NEW Harness on the same database: the daemon restarting is exactly what
+        # an operator does while trying to fix the upstream, so the cache has to
+        # outlive the process that wrote it.
+        async with Harness(tmp, failing_document(tmp / "c", "error", "error"),
+                           name="c") as h:
+            async with relay_for(h, "syslog") as relay:
+                await rpc(relay, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                  "params": {}})
+                reply = await rpc(relay, {"jsonrpc": "2.0", "id": 2,
+                                          "method": "tools/list", "params": {}})
+                check("a FAILED tools/list is answered from the cache, across a "
+                      "restart — the server stays real for the agent",
+                      "error" not in reply
+                      and sorted(t["name"] for t in reply["result"]["tools"])
+                      == ["get_stats", "query_logs"], reply)
+                check("policy is still enforced on the cached list",
+                      all(t["name"] != "pulse_reboot"
+                          for t in reply["result"]["tools"]), reply)
+
+                reply = await rpc(relay, {"jsonrpc": "2.0", "id": 3,
+                                          "method": "tools/call",
+                                          "params": {"name": "query_logs",
+                                                     "arguments": {}}})
+                check("the failure surfaces at the CALL instead, which is where it "
+                      "can be explained", reply["result"]["isError"] is True, reply)
+
+        rows = Store(tmp / "c" / "state.sqlite3")
+        calls = rows.recent_mcp_calls(10)
+        check("a failed call is audited as an error, not as 'allowed' — the policy "
+              "said yes, but |mcp calls showing a logged-out server as healthy is "
+              "how this went unnoticed for days",
+              calls and calls[0]["decision"] == "error"
+              and "401" in (calls[0]["reason"] or ""),
+              dict(calls[0]) if calls else "no rows")
+        rows.close()
+
+        # The hang. No error is ever produced, so only the watchdog can answer.
+        original = mcpproxy.TOOLS_LIST_TIMEOUT_S
+        mcpproxy.TOOLS_LIST_TIMEOUT_S = 1.0
+        try:
+            async with Harness(tmp, failing_document(tmp / "c", "hang"),
+                               name="c") as h:
+                async with relay_for(h, "syslog") as relay:
+                    await rpc(relay, {"jsonrpc": "2.0", "id": 1,
+                                      "method": "initialize", "params": {}})
+                    reply = await rpc(relay, {"jsonrpc": "2.0", "id": 2,
+                                              "method": "tools/list", "params": {}},
+                                      timeout=10.0)
+                    check("a HUNG tools/list is answered from the cache too — a "
+                          "stdio server that wedges never produces an error at "
+                          "all, so the error path alone would let the CLI time the "
+                          "whole server out",
+                          "error" not in reply
+                          and sorted(t["name"] for t in reply["result"]["tools"])
+                          == ["get_stats", "query_logs"], reply)
+        finally:
+            mcpproxy.TOOLS_LIST_TIMEOUT_S = original
+
+    with tempfile.TemporaryDirectory() as raw:
+        tmp = Path(raw)
+        async with Harness(tmp, failing_document(tmp / "e", "error"), name="e") as h:
+            async with relay_for(h, "syslog") as relay:
+                await rpc(relay, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                  "params": {}})
+                reply = await rpc(relay, {"jsonrpc": "2.0", "id": 2,
+                                          "method": "tools/list", "params": {}})
+                check("with NOTHING cached it still reports the error rather than "
+                      "inventing an empty tool list — a fabricated empty list would "
+                      "be a worse lie than the error", "error" in reply, reply)
 
 
 async def main() -> int:
@@ -614,6 +815,7 @@ async def main() -> int:
     await test_oauth()
     await test_command()
     await test_upstream_failures()
+    await test_tool_cache()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {failures}")

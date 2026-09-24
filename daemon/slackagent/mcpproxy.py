@@ -51,6 +51,12 @@ LINE_LIMIT = 16 * 1024 * 1024
 # `resources/read` in particular is an arbitrary-read primitive.
 REFUSED_PREFIXES = ("resources/", "prompts/", "completion/")
 
+# How long to wait for an upstream's tools/list before answering from the cache.
+# Deliberately under the CLI's own MCP startup timeout: the whole point is to answer
+# BEFORE the CLI gives up and drops the server, because once it has, the agent is
+# working from a context in which the server does not exist.
+TOOLS_LIST_TIMEOUT_S = 20.0
+
 
 @dataclass
 class RunContext:
@@ -69,6 +75,11 @@ class _Pending:
     method: str
     tool: str = ""
     started: float = field(default_factory=time.monotonic)
+    # The cursor a tools/list carried, if any. Only a first page is worth caching.
+    cursor: str = ""
+    # Set once the guest has been given an answer from the cache. A late reply for
+    # the same id must then be swallowed rather than sent as a second response.
+    answered: bool = False
 
 
 def _digest(arguments: Any) -> str:
@@ -98,12 +109,56 @@ def tool_error(request_id: Any, text: str) -> dict:
     }
 
 
+def upstream_failure_text(server_name: str, detail: str) -> str:
+    """What the agent is told when a call could not reach its upstream.
+
+    Worth wording carefully: the agent reads this and decides what to tell the
+    person. Left as a bare exception string it retries, or reports "the tool is
+    broken" — when the true answer is almost always that a credential expired and
+    only the operator can fix it. Naming that stops a retry loop and gets the
+    right sentence into Slack.
+    """
+    lowered = detail.lower()
+    logged_out = any(
+        marker in lowered
+        for marker in ("401", "invalid_grant", "unauthorized", "unauthorised",
+                       "re-authorise", "expired", "forbidden", "403")
+    )
+    text = f"The {server_name} MCP server could not be reached: {detail}"
+    if logged_out:
+        text += (
+            f". That reads as {server_name} being logged out rather than a problem "
+            "with this call — its credential has expired on the host and only the "
+            "operator can renew it. Report that instead of retrying."
+        )
+    return text
+
+
 def protocol_error(request_id: Any, message: str, code: int = -32601) -> dict:
     return {
         "jsonrpc": "2.0",
         "id": request_id,
         "error": {"code": code, "message": message},
     }
+
+
+def _failure_text(message: dict) -> str:
+    """Why a reply failed, or "" when it did not.
+
+    Covers both shapes a failure arrives in — a JSON-RPC error and a tool result
+    carrying `isError` — because an upstream that is logged out uses the second one
+    and it is the one that reads as success to anything checking only for `error`.
+    """
+    error = message.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or "the upstream returned an error")
+    result = message.get("result")
+    if isinstance(result, dict) and result.get("isError"):
+        text = " ".join(
+            c.get("text", "") for c in result.get("content") or [] if isinstance(c, dict)
+        ).strip()
+        return text or "the tool reported an error"
+    return ""
 
 
 def _unwrap_tools(server_name: str, reply: dict | None) -> list[dict]:
@@ -289,6 +344,13 @@ class OAuth:
             payload["client_secret"] = self._config["client_secret"]
         if self._config.get("scope"):
             payload["scope"] = self._config["scope"]
+        # RFC 8707. An authorisation server that binds a token to an audience may
+        # narrow or refuse one refreshed without the indicator, and the result is a
+        # token the upstream 401s — indistinguishable from a revoked grant, which is
+        # the failure this whole class of bug hides behind. Sent only when the grant
+        # was obtained with one, so the migrated grants are unaffected.
+        if self._config.get("resource"):
+            payload["resource"] = self._config["resource"]
 
         session = self._session or aiohttp.ClientSession()
         try:
@@ -380,7 +442,9 @@ class HttpUpstream(Upstream):
                 return
             if message.get("method") == "tools/call":
                 await self._queue.put(
-                    tool_error(request_id, f"the upstream MCP server failed: {exc}")
+                    tool_error(
+                        request_id, upstream_failure_text(self._server.name, str(exc))
+                    )
                 )
             else:
                 # initialize / tools/list / anything else that isn't a tool call: a
@@ -695,6 +759,8 @@ class _Session:
         self._upstream = upstream
         self._pending: dict[str, _Pending] = {}
         self._calls = 0
+        self._tools_seen: list[dict] = []
+        self._watchdogs: set[asyncio.Task] = set()
         self._extra_allow, self._extra_deny = self._runtime_patterns()
 
     def _runtime_patterns(self) -> tuple[tuple[str, ...], tuple[str, ...]]:
@@ -715,7 +781,7 @@ class _Session:
         done, pending = await asyncio.wait(
             {to_upstream, to_guest}, return_when=asyncio.FIRST_COMPLETED
         )
-        for task in pending:
+        for task in (*pending, *self._watchdogs):
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -745,7 +811,12 @@ class _Session:
             message = await self._upstream.receive()
             if message is None:
                 return
-            await self._send_guest(self._filter_response(message))
+            filtered = self._filter_response(message)
+            # None means the proxy has already answered this id from the cache, so
+            # the late reply is swallowed: two responses to one id is a protocol
+            # violation the CLI would be right to choke on.
+            if filtered is not None:
+                await self._send_guest(filtered)
 
     # -- the two interceptions ------------------------------------------------
 
@@ -768,7 +839,11 @@ class _Session:
             return True
 
         if method == "tools/list" and request_id is not None:
-            self._pending[str(request_id)] = _Pending(method)
+            cursor = str((message.get("params") or {}).get("cursor") or "")
+            self._pending[str(request_id)] = _Pending(method, cursor=cursor)
+            watchdog = asyncio.create_task(self._tools_list_watchdog(request_id))
+            self._watchdogs.add(watchdog)
+            watchdog.add_done_callback(self._watchdogs.discard)
             return False
 
         if method != "tools/call":
@@ -812,7 +887,8 @@ class _Session:
             self._pending[str(request_id)] = _Pending(method, tool=tool)
         return False
 
-    def _filter_response(self, message: dict) -> dict:
+    def _filter_response(self, message: dict) -> dict | None:
+        """The reply to send the guest, or None to swallow it."""
         request_id = message.get("id")
         if request_id is None:
             return message
@@ -821,7 +897,7 @@ class _Session:
             return message
 
         if pending.method == "tools/list":
-            return self._filter_tools(message)
+            return self._tools_list_response(message, pending)
 
         # A completed tools/call: audit it, and enforce the size cap.
         elapsed = int((time.monotonic() - pending.started) * 1000)
@@ -838,8 +914,113 @@ class _Session:
                 f"{self._server.name}, so it was not passed on. Narrow the query and "
                 "try again.",
             )
+
+        # A call that failed is recorded as such. It used to be audited "allowed",
+        # which is true of the policy decision and false of everything an operator
+        # reading `|mcp calls` wants to know — a logged-out upstream looked
+        # identical to a working one right up until someone read the daemon log.
+        failure = _failure_text(message)
+        if failure:
+            self._audit(pending.tool, "error", failure[:200], "", len(blob), elapsed)
+            return message
+
         self._audit(pending.tool, "allowed", "", "", len(blob), elapsed)
         return message
+
+    def _tools_list_response(self, message: dict, pending: _Pending) -> dict | None:
+        """Cache a good tools/list; substitute the cache for a failed one."""
+        try:
+            tools = _unwrap_tools(self._server.name, message)
+        except RuntimeError as exc:
+            if pending.answered:
+                return None
+            return self._cached_tools_list(message, str(exc))
+
+        result = message.get("result") or {}
+        # Pages are accumulated and only written out when the last one lands.
+        # Caching a single page and later serving it as the whole list would
+        # silently shrink the toolset — a subtler version of the bug being fixed
+        # here — and caching nothing at all whenever a server paginates would mean
+        # the servers most worth protecting are the ones left unprotected.
+        if not pending.cursor:
+            self._tools_seen = []
+        seen = {(tool or {}).get("name") for tool in self._tools_seen}
+        self._tools_seen.extend(
+            tool for tool in tools if (tool or {}).get("name") not in seen
+        )
+        if not result.get("nextCursor"):
+            try:
+                self._store.save_mcp_tools(self._server.name, self._tools_seen)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "mcp[%s] could not cache the tool list: %s",
+                    self._server.name, exc,
+                )
+        if pending.answered:
+            # It recovered, but only after the guest was given the cache. The fresh
+            # list is now stored for next time; sending it would be a second reply.
+            log.info(
+                "mcp[%s] tools/list arrived after the cache was served; cached it "
+                "for next time", self._server.name,
+            )
+            return None
+        return self._filter_tools(message)
+
+    def _cached_tools_list(self, message: dict, detail: str) -> dict:
+        """The last known tool list, standing in for one the upstream could not give.
+
+        Without this the guest gets a JSON-RPC error, the CLI drops the server, and
+        the agent's context simply has no such MCP server in it — so it reports that
+        the capability does not exist rather than that it is broken. Serving the
+        cached list keeps the server real and moves the failure to the call, where
+        it can be explained.
+        """
+        cached, seen_at = self._store.mcp_tools(self._server.name)
+        if not cached:
+            log.warning(
+                "mcp[%s] tools/list failed and nothing is cached, so the server will "
+                "disappear for this run: %s", self._server.name, detail,
+            )
+            return message
+
+        age = int(time.time()) - seen_at if seen_at else 0
+        log.warning(
+            "mcp[%s] tools/list failed (%s); serving %d tool(s) cached %dm ago so the "
+            "server stays visible — calls will fail until it is fixed",
+            self._server.name, detail, len(cached), age // 60,
+        )
+        substitute = {
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {"tools": cached},
+        }
+        return self._filter_tools(substitute)
+
+    async def _tools_list_watchdog(self, request_id: Any) -> None:
+        """Answer a tools/list from the cache if the upstream has gone quiet.
+
+        The error path alone is not enough: a stdio server that hangs never produces
+        an error at all, so the request is simply never answered and the CLI times
+        the whole server out. That is the case that started this — a tool timing out
+        and the server vanishing with it.
+        """
+        await asyncio.sleep(TOOLS_LIST_TIMEOUT_S)
+        pending = self._pending.get(str(request_id))
+        if pending is None or pending.answered:
+            return
+        cached, _ = self._store.mcp_tools(self._server.name)
+        if not cached:
+            log.warning(
+                "mcp[%s] tools/list has not answered in %.0fs and nothing is cached",
+                self._server.name, TOOLS_LIST_TIMEOUT_S,
+            )
+            return
+        pending.answered = True
+        reply = self._cached_tools_list(
+            {"id": request_id},
+            f"no reply in {TOOLS_LIST_TIMEOUT_S:.0f}s",
+        )
+        await self._send_guest(reply)
 
     def _filter_tools(self, message: dict) -> dict:
         """Drop tools this caller may not call.

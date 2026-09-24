@@ -152,6 +152,22 @@ CREATE TABLE IF NOT EXISTS mcp_policy (
     UNIQUE (server, slack_user, effect, pattern)
 );
 
+-- The last tools/list an upstream answered successfully, so a server that is down
+-- keeps EXISTING for the agent instead of vanishing. A failed tools/list used to
+-- reach the CLI as a JSON-RPC error, which reads as "there is no such MCP server" —
+-- so the agent stopped believing the tool existed and planned around its absence,
+-- rather than reporting that it was logged out. Serving the last known list means
+-- the failure surfaces where it is legible: at the call.
+--
+-- The UNFILTERED list is stored. The per-caller policy filter is applied live on
+-- the way out, so a cached list still cannot show anyone a tool they may not call,
+-- and a policy change takes effect while the upstream is down.
+CREATE TABLE IF NOT EXISTS mcp_tool_cache (
+    server     TEXT    PRIMARY KEY,
+    tools_json TEXT    NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
 -- Servers switched off from Slack. Absence means enabled, like thread_modes:
 -- enabling is a DELETE and a newly configured server needs no write to be live.
 CREATE TABLE IF NOT EXISTS mcp_disabled (
@@ -791,6 +807,38 @@ class Store:
         """
         row = self.mcp_header_override_row(server, slack_user)
         return json.loads(row["headers_json"]) if row else None
+
+    def save_mcp_tools(self, server: str, tools: list[dict]) -> None:
+        """Remember the tools an upstream last answered with, unfiltered."""
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO mcp_tool_cache (server, tools_json, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(server) DO UPDATE SET "
+                "tools_json = excluded.tools_json, "
+                "updated_at = excluded.updated_at",
+                (server, json.dumps(tools), int(time.time())),
+            )
+            self._db.commit()
+
+    def mcp_tools(self, server: str) -> tuple[list[dict], int]:
+        """(last known tools, when they were seen). ([], 0) when never seen.
+
+        A cache written by a previous daemon is as good as one written by this
+        one — the point is to survive exactly the restart that an operator does
+        while trying to fix the upstream.
+        """
+        with self._lock:
+            row = self._db.execute(
+                "SELECT tools_json, updated_at FROM mcp_tool_cache WHERE server = ?",
+                (server,),
+            ).fetchone()
+        if row is None:
+            return [], 0
+        try:
+            tools = json.loads(row["tools_json"])
+        except (TypeError, ValueError):
+            return [], 0
+        return (tools if isinstance(tools, list) else []), int(row["updated_at"])
 
     def mcp_header_override_row(
         self, server: str, slack_user: str = ""

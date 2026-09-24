@@ -46,6 +46,18 @@ def main() -> int:
                 "seenToken": os.environ.get("FAKE_TOKEN", ""),
             }
         elif method == "tools/list":
+            # Two ways a real upstream withholds its tool list, both of which used
+            # to make the server vanish from the agent's context entirely.
+            mode = os.environ.get("FAKE_TOOLS_LIST", "")
+            if mode == "hang":
+                continue  # never answers, exactly like a wedged stdio server
+            if mode == "error":
+                sys.stdout.write(json.dumps({
+                    "jsonrpc": "2.0", "id": request_id,
+                    "error": {"code": -32000, "message": "401 unauthorized"},
+                }) + "\n")
+                sys.stdout.flush()
+                continue
             cursor = (message.get("params") or {}).get("cursor")
             result = {"tools": TOOLS}
             if cursor is None:
@@ -54,6 +66,16 @@ def main() -> int:
             params = message.get("params") or {}
             tool = params.get("name") or ""
             note(tool)
+            if os.environ.get("FAKE_TOOLS_CALL") == "error":
+                # How a logged-out upstream actually answers: a tool RESULT carrying
+                # isError, not a JSON-RPC error. Anything checking only for "error"
+                # reads this as a success.
+                result = {"isError": True, "content": [
+                    {"type": "text", "text": "401 unauthorized"}]}
+                sys.stdout.write(json.dumps(
+                    {"jsonrpc": "2.0", "id": request_id, "result": result}) + "\n")
+                sys.stdout.flush()
+                continue
             arguments = params.get("arguments") or {}
             text = "x" * 400_000 if arguments.get("big") else f"ran {tool}"
             result = {"content": [{"type": "text", "text": text}]}

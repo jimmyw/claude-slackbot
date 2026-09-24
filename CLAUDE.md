@@ -247,6 +247,80 @@ terminate on the host; `mcp-relay` in the guest holds none.
   proxy over a real socket, and the fake records every call it receives, which is how "a
   blocked call never leaves the host" is proved rather than asserted.
 
+## A logged-out upstream must not DISAPPEAR (2026-09-24)
+
+Three servers were down at once and each failed differently, which is what made the
+shape obvious. syslog's Cookie 401'd, homevolt's stdio server answered
+`Session expired -- run homevolt login`, and linear's OAuth refresh had been
+answering `invalid_grant` for five days. The only signal any of it produced was a
+WARNING in `daemon.log`.
+
+- **A failed `tools/list` used to delete the server from the agent's world.** It
+  reached the CLI as a JSON-RPC error, the CLI dropped the server, and the agent's
+  context then contained no such MCP server — so it reported the capability as
+  non-existent and planned around its absence instead of saying "linear is logged
+  out". `mcp_tool_cache` now holds the last good list and `_cached_tools_list`
+  serves it, so the server stays real and the failure lands at the call, where it
+  can be explained. With nothing cached the error still passes through: a
+  fabricated empty list would be a worse lie.
+- **The error path alone was not enough.** `StdioUpstream.send` has no failure
+  handling at all, so a wedged stdio server never produces an error — the request
+  is simply never answered and the CLI times the whole server out. That is the case
+  that prompted this. `_tools_list_watchdog` answers from the cache after
+  `TOOLS_LIST_TIMEOUT_S` (20s, deliberately under the CLI's own startup timeout).
+  A late real reply is then **swallowed**, not sent: two responses to one id is a
+  protocol violation. `_filter_response` returning None is what says "swallow".
+- **The UNFILTERED list is cached** and the per-caller policy filter runs live on
+  the way out, so a cached list still cannot show anyone a tool they may not call,
+  and `|mcp allow` takes effect while the upstream is down.
+- **Pages are accumulated, not cached one at a time.** Caching a single page and
+  later serving it as the whole list would silently shrink the toolset — a subtler
+  version of the bug being fixed — and skipping pagination entirely would leave the
+  fullest servers unprotected.
+- **A failed call was audited `allowed`.** True of the policy decision, useless to
+  anyone reading `|mcp calls`, and the reason a logged-out server looked healthy for
+  days. `_failure_text` now recognises both failure shapes — a JSON-RPC error and a
+  tool result carrying `isError`, which is the one a logged-out upstream actually
+  uses and the one that reads as success to anything checking only for `error`.
+- **The failure text is aimed at the agent, not at a log reader.**
+  `upstream_failure_text` names the server and, when the error smells of auth, says
+  the credential expired and only the operator can renew it. Left as a bare
+  exception string the agent retries, or reports "the tool is broken".
+- A timed-out `rpc` in the test used to leave the relay connected and the session
+  pumping, so `server.wait_closed()` in `Harness.__aexit__` waited for ever — a
+  failing assertion presented as a hung run. `relay_for` tears the relay down in a
+  finally.
+
+## Authorising an MCP grant on the host
+
+`bootstrap/authorise-mcp-oauth.py` creates a grant; `mcpproxy.OAuth` only refreshes
+one. Both original grants were lifted out of the guest by `60-migrate-mcp.sh`, so
+until this existed a rebuilt upstream or a revoked grant meant hand-editing
+`mcp.json`. Discovery (RFC 9728 → RFC 8414), DCR, authorization code + PKCE S256,
+`resource` on both legs.
+
+- **The database shadows the config file.** `OAuth._access_token` reads `mcp_tokens`
+  first, so a freshly authorised grant written to the file is ignored while a dead
+  row survives — the re-authorisation appears to have done nothing at all. The
+  script deletes the row, and the `|mcp login` header override too, since a server
+  that has moved to OAuth has no use for last month's Cookie and
+  `_default_upstream` would keep merging it on top of the bearer.
+- **Do not reuse a `client_id` that is a URL.** linear's was
+  `https://claude.ai/oauth/claude-code-client-metadata` — Claude Code's client-ID
+  metadata document, which lists *its* redirect URIs, not ours. `/authorize` would
+  refuse our loopback. Only an opaque id is ours to reuse.
+- **Scope precedence is `--scope` → the existing grant → the RESOURCE's metadata →
+  the authorisation server's menu.** linear's AS advertises `read write openid
+  email` while the resource needs `read write`; taking the AS list would quietly put
+  an identity scope on a bot's grant every time it was re-authorised.
+- **`resource` is sent on refresh too** (`OAuth._refresh`), only when the grant was
+  obtained with one so the migrated grants are untouched. An audience-bound server
+  can otherwise hand back a token its own API then 401s — which reads exactly like a
+  revoked grant, i.e. the failure this whole section is about.
+- The browser leg accepts either a loopback callback or a pasted redirect URL,
+  because the browser is rarely on terra and "set up a port forward first" is how a
+  fix goes unused.
+
 ## What the MCP migration taught (terra, 2026-08-18)
 
 The three servers now run through the host proxy; the VM holds nothing. Four things
