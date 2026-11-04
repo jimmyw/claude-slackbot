@@ -99,6 +99,30 @@ def test_parsing() -> None:
            lambda: parse_server("s", {**http, "proxy": "10.0.0.2:8888"}),
            "must be an http")
 
+    tls = {**http, "proxy": "https://10.0.0.2:8443"}
+    server = parse_server("s", {**tls, "proxy_ca": "/etc/ca.crt",
+                                "proxy_auth": {"username": "u", "password": "pw"}})
+    check("proxy_ca and proxy_auth parse",
+          (server.proxy_ca, server.proxy_user, server.proxy_password)
+          == ("/etc/ca.crt", "u", "pw"))
+    check("the proxy password never appears in a Server's repr", "pw" not in repr(server),
+          repr(server))
+    raises("proxy_ca needs an https proxy",
+           lambda: parse_server("s", {**http, "proxy": "http://10.0.0.2:8888",
+                                      "proxy_ca": "/etc/ca.crt"}), "https://")
+    raises("proxy_auth needs a proxy",
+           lambda: parse_server("s", {**http, "proxy_auth": {"username": "u",
+                                                             "password": "pw"}}),
+           "needs a proxy")
+    raises("proxy_auth with an empty password is refused",
+           lambda: parse_server("s", {**tls, "proxy_auth": {"username": "u",
+                                                            "password": ""}}),
+           "non-empty")
+    raises("an unknown proxy_auth key is refused",
+           lambda: parse_server("s", {**tls, "proxy_auth": {"username": "u",
+                                                            "password": "p", "x": 1}}),
+           "x")
+
     # A typo must not read as "no policy" — that silently denies everything, or
     # silently presents no credential, and looks like a broken upstream.
     raises("an unknown server key is refused",

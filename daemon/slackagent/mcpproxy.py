@@ -26,6 +26,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import ssl
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
@@ -387,6 +388,45 @@ class OAuth:
         return access
 
 
+class _ProxyTrustConnector(aiohttp.TCPConnector):
+    """Trust a private CA for the hop to the proxy, and for nothing else.
+
+    aiohttp builds ONE ssl context per request and applies it to both the connection to
+    an https proxy and the TLS that is then tunnelled through it to the target. Handing
+    it the proxy's private CA would therefore also make that CA acceptable for the
+    upstream, and a proxy that holds the CA's key could then impersonate the upstream
+    and read the credential this whole arrangement exists to protect. So the proxy hop
+    gets a context that trusts only the private CA, and everything else keeps the
+    default one. Relies on `_get_ssl_context`, which is private: the test that drives a
+    real TLS proxy is what notices if an aiohttp upgrade moves it.
+    """
+
+    def __init__(self, proxy_host: str, proxy_port: int, proxy_context: ssl.SSLContext,
+                 **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        # The hop is identified by host AND port: a target can share the proxy's host
+        # (and in a test always does), so the host alone would hand it the proxy's CA.
+        self._proxy_addr = (proxy_host, proxy_port)
+        self._proxy_context = proxy_context
+
+    def _get_ssl_context(self, req):  # noqa: ANN001, ANN202
+        if (req.url.host, req.url.port) == self._proxy_addr:
+            return self._proxy_context
+        return super()._get_ssl_context(req)
+
+
+def _connector_for(server: Server) -> aiohttp.TCPConnector | None:
+    """A connector that trusts the server's proxy CA for the proxy hop, if it has one."""
+    if not server.proxy_ca:
+        return None
+    from urllib.parse import urlsplit
+
+    # cafile given => ONLY that CA is loaded, no system roots.
+    context = ssl.create_default_context(cafile=server.proxy_ca)
+    parts = urlsplit(server.proxy)
+    return _ProxyTrustConnector(parts.hostname or "", parts.port or 443, context)
+
+
 class HttpUpstream(Upstream):
     """A streamable-HTTP MCP server, with the credential injected here.
 
@@ -415,7 +455,7 @@ class HttpUpstream(Upstream):
 
     async def start(self) -> None:
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(connector=_connector_for(self._server))
 
     async def _request_headers(self, force_auth: bool = False) -> dict[str, str]:
         headers = {
@@ -464,7 +504,12 @@ class HttpUpstream(Upstream):
     async def _post(self, message: dict, *, retry_auth: bool = True) -> None:
         assert self._session is not None
         # Only passed when set, so every server without a proxy behaves exactly as before.
-        extra = {"proxy": self._server.proxy} if self._server.proxy else {}
+        extra: dict[str, Any] = {}
+        if self._server.proxy:
+            extra["proxy"] = self._server.proxy
+            if self._server.proxy_user:
+                extra["proxy_auth"] = aiohttp.BasicAuth(
+                    self._server.proxy_user, self._server.proxy_password)
         async with self._session.post(
             self._server.url,
             json=message,

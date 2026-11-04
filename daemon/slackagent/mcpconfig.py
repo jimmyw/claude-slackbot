@@ -49,8 +49,10 @@ DEFAULT_MAX_RESULT_BYTES = 256 * 1024
 
 _SERVER_KEYS = {
     "type", "url", "command", "args", "credential", "tools",
-    "max_calls_per_run", "max_result_bytes", "description", "proxy",
+    "max_calls_per_run", "max_result_bytes", "description", "proxy", "proxy_ca",
+    "proxy_auth",
 }
+_PROXY_AUTH_KEYS = {"username", "password"}
 _CREDENTIAL_KEYS = {"mode", "headers", "env", "oauth", "users", "shared_fallback"}
 _TOOLS_KEYS = {"allow", "deny", "users"}
 _USER_CREDENTIAL_KEYS = {"headers", "env", "oauth"}
@@ -85,6 +87,12 @@ class Server:
     # policy trusts. TLS is tunnelled with CONNECT, so the proxy sees the destination but
     # not the credential.
     proxy: str = ""
+    # A private CA to trust for the connection to the PROXY ONLY (see mcpproxy), and the
+    # credentials the proxy itself demands. The password is kept out of repr so a logged
+    # or printed Server cannot leak it.
+    proxy_ca: str = ""
+    proxy_user: str = ""
+    proxy_password: str = field(default="", repr=False)
     mode: str = MODE_SHARED
     shared_fallback: bool = False
     shared: Credential = field(default_factory=Credential)
@@ -230,6 +238,25 @@ def parse_server(name: str, raw: Any) -> Server:
             raise McpConfigError(
                 f"server {name!r}: proxy must be an http:// or https:// URL"
             )
+    proxy_ca = raw.get("proxy_ca") or ""
+    if proxy_ca and (not isinstance(proxy_ca, str) or not proxy.startswith("https://")):
+        raise McpConfigError(
+            f"server {name!r}: proxy_ca needs an https:// proxy (it is the CA for the "
+            "TLS connection to the proxy itself)"
+        )
+    proxy_auth = raw.get("proxy_auth")
+    proxy_user = proxy_password = ""
+    if proxy_auth is not None:
+        if not proxy:
+            raise McpConfigError(f"server {name!r}: proxy_auth needs a proxy")
+        _unknown(proxy_auth, _PROXY_AUTH_KEYS, f"server {name!r}.proxy_auth")
+        proxy_user = proxy_auth.get("username")
+        proxy_password = proxy_auth.get("password")
+        if not (isinstance(proxy_user, str) and proxy_user
+                and isinstance(proxy_password, str) and proxy_password):
+            raise McpConfigError(
+                f"server {name!r}.proxy_auth needs a non-empty username and password"
+            )
 
     args = raw.get("args") or []
     if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
@@ -283,6 +310,9 @@ def parse_server(name: str, raw: Any) -> Server:
         args=tuple(args),
         description=raw.get("description") or "",
         proxy=proxy,
+        proxy_ca=proxy_ca,
+        proxy_user=proxy_user,
+        proxy_password=proxy_password,
         mode=mode,
         shared_fallback=bool(cred_raw.get("shared_fallback")),
         shared=shared,
