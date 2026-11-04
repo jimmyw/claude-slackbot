@@ -55,11 +55,50 @@ def die(message: str) -> None:
     raise SystemExit(1)
 
 
+NO_TUNNEL = 599
+
+
+def _tunnel_is_real(tls: ssl.SSLSocket, host: str) -> bool:
+    """TLS handshake with `host` THROUGH the open CONNECT tunnel, verified normally.
+
+    A proxy that hides itself from callers it does not trust (probe resistance) answers
+    a wrong password with the same `200` a real tunnel gets, and then serves nothing. A
+    status code alone therefore cannot prove the credentials work; completing a handshake
+    with the real target can, because only a real tunnel has a server on the other end.
+    """
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    inner = ssl.create_default_context().wrap_bio(
+        incoming, outgoing, server_hostname=host)
+    tls.settimeout(10)
+    try:
+        while True:
+            try:
+                inner.do_handshake()
+            except ssl.SSLWantReadError:
+                pending = outgoing.read()
+                if pending:
+                    tls.sendall(pending)
+                chunk = tls.recv(65536)
+                if not chunk:
+                    return False
+                incoming.write(chunk)
+                continue
+            pending = outgoing.read()
+            if pending:
+                tls.sendall(pending)
+            return True
+    except (ssl.SSLError, OSError):
+        return False
+
+
 def check_connect(proxy: str, ca: Path | None, user: str, password: str,
                   target_host: str) -> int:
-    """HTTP status of `CONNECT <target_host>:443` through the proxy, verified against `ca`.
+    """Status of `CONNECT <target_host>:443` through the proxy, verified against `ca`.
 
-    Raises ssl.SSLError / OSError when the proxy itself cannot be reached or trusted.
+    200 means a REAL tunnel (see `_tunnel_is_real`); NO_TUNNEL means the proxy said 200
+    but nothing was behind it, which is how a probe-resistant proxy rejects a wrong
+    password. Raises ssl.SSLError / OSError when the proxy itself cannot be reached or
+    trusted.
     """
     parts = urllib.parse.urlsplit(proxy)
     context = ssl.create_default_context(cafile=str(ca)) if ca else ssl.create_default_context()
@@ -69,11 +108,13 @@ def check_connect(proxy: str, ca: Path | None, user: str, password: str,
             tls.sendall((f"CONNECT {target_host}:443 HTTP/1.1\r\nHost: {target_host}:443\r\n"
                          f"Proxy-Authorization: Basic {token}\r\n\r\n").encode())
             status_line = tls.recv(256).split(b"\r\n", 1)[0].decode(errors="replace")
-    try:
-        return int(status_line.split(" ")[1])
-    except (IndexError, ValueError):
-        die(f"the proxy answered something that is not HTTP: {status_line[:60]!r}")
-    raise AssertionError("unreachable")
+            try:
+                status = int(status_line.split(" ")[1])
+            except (IndexError, ValueError):
+                die(f"the proxy answered something that is not HTTP: {status_line[:60]!r}")
+            if status == 200 and not _tunnel_is_real(tls, target_host):
+                return NO_TUNNEL
+            return status
 
 
 def main() -> None:
@@ -129,8 +170,10 @@ def main() -> None:
     except (ssl.SSLError, OSError) as exc:
         status = 0
         print(f"  could not reach or trust the proxy: {exc}", file=sys.stderr)
-    verdict = {200: "ok -- the proxy accepted the credentials and opened a tunnel",
+    verdict = {200: "ok -- the proxy accepted the credentials and opened a working tunnel",
                407: "REFUSED -- the proxy rejected the username/password",
+               NO_TUNNEL: "REFUSED -- the proxy said 200 but no real tunnel followed; a proxy "
+                          "that hides itself does this for a wrong password",
                0: "FAILED -- see above"}.get(status, f"unexpected status {status}")
     print(f"  {verdict}")
     if status != 200 and not args.force:
