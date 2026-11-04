@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Provision the agent VM. Run as example AFTER 00-host-packages.sh and a fresh
+# Provision the agent VM. Run as the unprivileged operator user AFTER 00-host-packages.sh and a fresh
 # login (the libvirt group must be active — check with `id`).
 #
 #   ./bootstrap/10-provision-vm.sh

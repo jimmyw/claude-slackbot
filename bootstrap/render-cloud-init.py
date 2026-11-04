@@ -20,9 +20,15 @@ Usage:
 """
 from __future__ import annotations
 
+import atexit
 import base64
+import shutil
 import sys
+import tempfile
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from vmfiles import stage  # noqa: E402
 
 STAGING = "/var/lib/agent-provision"
 
@@ -91,8 +97,15 @@ def main() -> int:
     write_files: list[str] = []
     install_cmds: list[str] = []
 
+    # vm-files/ with the private vm-files.local/ overlay applied; see vmfiles.py.
+    staging = Path(tempfile.mkdtemp(prefix="vmfiles."))
+    atexit.register(shutil.rmtree, staging, True)
+    payload_root = staging / "tree"
+    for note in stage(repo, payload_root):
+        print(f"    overlay {note}", file=sys.stderr)
+
     for source, dest, mode, owner in PAYLOAD:
-        path = repo / "vm-files" / source
+        path = payload_root / source
         if not path.is_file():
             print(f"missing payload file: {path}", file=sys.stderr)
             return 1

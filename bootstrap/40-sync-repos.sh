@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Clone/update repos on the HOST and sync working copies into the agent's VM.
 #
-#   ./bootstrap/40-sync-repos.sh <vm-ip> example/foo example/bar
+#   ./bootstrap/40-sync-repos.sh <vm-ip> your-org/foo your-org/bar
 #   ./bootstrap/40-sync-repos.sh <vm-ip> -f repos.txt
 #   ./bootstrap/40-sync-repos.sh <vm-ip> --all          # every repo you can read
 #
@@ -20,7 +20,7 @@ set -euo pipefail
 MIRROR="${MIRROR:-$HOME/agent-repos}"
 WORKDIR=/home/agent/work
 ADMIN_KEY="${ADMIN_KEY:-$HOME/.ssh/agent_vm_admin_ed25519}"
-DEFAULT_OWNER="${DEFAULT_OWNER:-example}"
+DEFAULT_OWNER="${DEFAULT_OWNER:-}"
 
 VM_HOST="${1:-}"
 shift || true
@@ -42,6 +42,7 @@ case "${1:-}" in
         done < "$2"
         ;;
     --all)
+        [[ -n "$DEFAULT_OWNER" ]] || { echo "--all needs DEFAULT_OWNER=<github-org-or-user>" >&2; exit 64; }
         echo "==> Enumerating repos you can read in '$DEFAULT_OWNER'"
         mapfile -t REPOS < <(gh repo list "$DEFAULT_OWNER" --limit 500 \
             --no-archived --json nameWithOwner --jq '.[].nameWithOwner')
@@ -54,7 +55,13 @@ esac
 
 # Bare names get the default owner, so a list file can just say "foo".
 for i in "${!REPOS[@]}"; do
-    [[ "${REPOS[$i]}" == */* ]] || REPOS[$i]="$DEFAULT_OWNER/${REPOS[$i]}"
+    if [[ "${REPOS[$i]}" != */* ]]; then
+        [[ -n "$DEFAULT_OWNER" ]] || {
+            echo "'${REPOS[$i]}' has no owner; write owner/repo or set DEFAULT_OWNER" >&2
+            exit 64
+        }
+        REPOS[$i]="$DEFAULT_OWNER/${REPOS[$i]}"
+    fi
 done
 
 if (( ${#REPOS[@]} == 0 )); then

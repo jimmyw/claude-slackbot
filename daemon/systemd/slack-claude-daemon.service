@@ -1,6 +1,6 @@
 [Unit]
 Description=Slack-controlled Claude Code daemon
-Documentation=file:///home/example/slackbot/README.md
+Documentation=file://%h/slackbot/README.md
 After=network-online.target libvirtd.service slack-claude-ssh-agent.service
 Wants=slack-claude-ssh-agent.service
 Wants=network-online.target
@@ -11,43 +11,41 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=/home/example/slackbot/daemon
+WorkingDirectory=%h/slackbot/daemon
 # The leading '-' makes a missing file non-fatal on purpose. Without it, no .env
 # means systemd fails the unit with "unavailable resources or another system
 # error", which says nothing useful. With it, the daemon starts and its own
 # Config.validate() reports exactly which variable is missing — visible in
 # `systemctl --user status` and in the log below.
-EnvironmentFile=-/home/example/slackbot/daemon/.env
+EnvironmentFile=-%h/slackbot/daemon/.env
 # Belt and braces: vmctl passes --connect explicitly, but a bare virsh run
 # from this unit would otherwise hit the empty qemu:///session instance.
 Environment=LIBVIRT_DEFAULT_URI=qemu:///system
 # The forwarded agent. Socket lives in the state dir rather than /tmp because
 # PrivateTmp gives each unit its own /tmp.
-Environment=SSH_AUTH_SOCK=/home/example/.local/share/slack-claude/ssh-agent.sock
-ExecStart=/home/example/slackbot/daemon/.venv/bin/python -m slackagent.app
+Environment=SSH_AUTH_SOCK=%h/.local/share/slack-claude/ssh-agent.sock
+ExecStart=%h/slackbot/daemon/.venv/bin/python -m slackagent.app
 Restart=always
 RestartSec=5
 
 # The daemon holds the Slack token and the VM key. It has no reason to write
-# anywhere but its own state directory -- plus the config directories of the
-# stdio MCP servers it spawns, which inherit this mount namespace. The homevolt
-# server caches scraped PFM action ids in ~/.config/example-homevolt/actions.json
-# and died on [Errno 30] without this: read-only was enough to LOAD its session,
-# so the failure only appeared on the first call that needed action discovery.
-# Note this class of bug is invisible outside the unit -- reproduce it with
-# `systemd-run --user -p ProtectHome=read-only ...`, not from a shell.
+# anywhere but its own state directory -- plus the config directories of any stdio
+# MCP servers it spawns, which inherit this mount namespace. A server that caches
+# under ~/.config/<name> needs its own `ReadWritePaths=%h/.config/<name>` line below:
+# read-only is enough to LOAD a session, so the failure only appears on the first call
+# that writes (`[Errno 30]`). This class of bug is invisible outside the unit --
+# reproduce it with `systemd-run --user -p ProtectHome=read-only ...`, not a shell.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/example/.local/share/slack-claude
-ReadWritePaths=/home/example/.config/example-homevolt
+ReadWritePaths=%h/.local/share/slack-claude
 
-# /var/log/journal is root:systemd-journal and example is not in that group, so
-# `journalctl --user` cannot read anything on this host. Log to a file the owner
+# On some hosts /var/log/journal is root:systemd-journal and the operator is not in
+# that group, so `journalctl --user` cannot read anything. Log to a file the owner
 # can actually tail. Journal output is kept as well, for whoever does have access.
-StandardOutput=append:/home/example/.local/share/slack-claude/daemon.log
-StandardError=append:/home/example/.local/share/slack-claude/daemon.log
+StandardOutput=append:%h/.local/share/slack-claude/daemon.log
+StandardError=append:%h/.local/share/slack-claude/daemon.log
 SyslogIdentifier=slack-claude
 
 [Install]

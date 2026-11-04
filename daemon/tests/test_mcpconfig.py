@@ -86,6 +86,19 @@ def test_parsing() -> None:
     check("caps have defaults",
           servers["syslog"].max_calls_per_run == DEFAULT_MAX_CALLS_PER_RUN)
 
+    http = {"type": "http", "url": "https://x/mcp"}
+    check("proxy defaults to none", servers["syslog"].proxy == "")
+    check("an http server can carry a proxy",
+          parse_server("s", {**http, "proxy": "http://10.0.0.2:8888"}).proxy
+          == "http://10.0.0.2:8888")
+    raises("a proxy on a stdio server is refused",
+           lambda: parse_server("s", {"type": "stdio", "command": "/x",
+                                      "proxy": "http://10.0.0.2:8888"}),
+           "only applies to http")
+    raises("a proxy that is not an http(s) URL is refused",
+           lambda: parse_server("s", {**http, "proxy": "10.0.0.2:8888"}),
+           "must be an http")
+
     # A typo must not read as "no policy" — that silently denies everything, or
     # silently presents no credential, and looks like a broken upstream.
     raises("an unknown server key is refused",

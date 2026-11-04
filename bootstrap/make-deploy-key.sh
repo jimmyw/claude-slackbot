@@ -3,7 +3,7 @@
 #
 #   ./bootstrap/make-deploy-key.sh <vm-ip> <owner/repo> [host]
 #
-#   ./bootstrap/make-deploy-key.sh 192.168.122.167 example/some-service
+#   ./bootstrap/make-deploy-key.sh 192.168.122.167 your-org/some-service
 #
 # Prints a public key for you to add on GitHub under
 #   Settings -> Deploy keys -> Add deploy key
@@ -13,7 +13,7 @@
 # repository, so a shared key cannot work. Each key therefore gets its own Host
 # alias in the agent's ~/.ssh/config, and you clone via that alias:
 #
-#   git@github.com-some-service:example/some-service.git
+#   git@github.com-some-service:your-org/some-service.git
 #
 # The private key is generated inside the guest and never leaves it. Only the
 # public half is printed.

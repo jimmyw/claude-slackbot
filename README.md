@@ -43,7 +43,8 @@ daemon/
   slackagent/              the daemon
   tests/                   see "Tests" below
   systemd/                 the --user unit
-vm-files/                  everything that lives inside the guest
+vm-files/                  everything that lives inside the guest (generic)
+vm-files.local/            YOUR private overlay on vm-files/ (gitignored)
 ```
 
 ## Setup
@@ -108,8 +109,8 @@ seed, so the guest is fully provisioned on first boot:
 - `~/.ssh/agent_vm_admin_ed25519` → the **`admin`** account: shell + sudo, for
   maintenance and `claude setup-token`. Never used by the daemon.
 
-Add your own keys to `bootstrap/operator-keys.pub` (public keys, safe to commit,
-one per line) and they are installed on `admin` at every build. Do **not** put a
+Copy `bootstrap/operator-keys.pub.example` to `bootstrap/operator-keys.pub`
+(gitignored) and add your own public keys, one per line; and they are installed on `admin` at every build. Do **not** put a
 key on the `agent` account: a shell there shares the forwarded ssh-agent with
 whatever you run and can read the agent's Claude token. `test_cloud_init.py`
 asserts that.
@@ -153,6 +154,25 @@ never touches the host disk or your shell history. **Do not paste the token into
 a chat or a terminal that logs** — if you have, revoke it in the Anthropic console
 and issue a new one.
 
+### Making the agent yours: `vm-files.local/`
+
+`vm-files/` is deliberately generic: how the bot behaves in Slack, how it uses memory, how
+approvals work. What the agent is *for* — your repos, products, runbooks, internal
+hostnames — does not belong in a shared repository, so it goes in `vm-files.local/`,
+which is gitignored and mirrors the same layout:
+
+```
+vm-files.local/home/agent/CLAUDE.append.md   appended to the guest CLAUDE.md
+vm-files.local/<same path as in vm-files/>    replaces that file
+```
+
+`bootstrap/vmfiles.py` merges the two, and both `render-cloud-init.py` (a fresh VM) and
+`30-install-vm-files.sh` (an existing one) call it, so they cannot disagree. A file at
+the same path replaces the shared one; `CLAUDE.append.md` is appended rather than
+replacing, which is almost always what you want. A *new* file is staged too, but only
+files named in the payload list of `render-cloud-init.py` (and the matching `install`
+lines in `30-install-vm-files.sh`) end up in the guest.
+
 `30-install-vm-files.sh <vm-ip>` pushes later changes to `vm-files/`; it isn't
 needed for a fresh build.
 
@@ -169,7 +189,7 @@ cp systemd/slack-claude-daemon.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now slack-claude-daemon
 
-# journalctl --user does not work for example on terra (/var/log/journal is
+# journalctl --user may not work for your user (/var/log/journal is
 # root:systemd-journal), so the unit also appends to a file:
 tail -f ~/.local/share/slack-claude/daemon.log
 ```
@@ -603,7 +623,7 @@ cd daemon
 
 1. **Host** — with `export LIBVIRT_DEFAULT_URI=qemu:///system` (see the gotcha
    above), `virsh list --all` works without sudo and `virsh net-list` shows
-   `default` as active/autostart; `loginctl show-user example -p Linger` →
+   `default` as active/autostart; `loginctl show-user $USER -p Linger` →
    `Linger=yes`.
 2. **Guest** — `virsh domifaddr agent-vm` gives an IP. The daemon key is refused
    a shell but runs the forced command:

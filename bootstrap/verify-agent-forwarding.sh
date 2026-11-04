@@ -3,7 +3,7 @@
 #
 #   ./bootstrap/verify-agent-forwarding.sh <vm-ip> [expected-github-user]
 #
-#   EXPECTED_GITHUB_USER=example-agent-ro ./bootstrap/verify-agent-forwarding.sh <ip>
+#   EXPECTED_GITHUB_USER=your-agent-ro ./bootstrap/verify-agent-forwarding.sh <ip>
 #
 # The key is forwarded UNCONSTRAINED. Destination constraints do not work for this
 # use case — see the long comment in load-agent-key.sh for the evidence — so the

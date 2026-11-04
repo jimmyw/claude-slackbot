@@ -31,8 +31,14 @@ SSH_OPTS=(-i "$ADMIN_KEY" -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-
 # for this would be a package the agent never otherwise needs. Everything is
 # unpacked to a staging dir first, then installed with explicit ownership — the
 # gate's files must land root-owned, not owned by the identity they constrain.
+# vm-files/ plus the private vm-files.local/ overlay, merged by the same code the
+# cloud-init renderer uses so a fresh VM and an updated one cannot differ.
+STAGE="$(mktemp -d)"
+trap 'rm -rf "$STAGE"' EXIT
+python3 "$REPO_DIR/bootstrap/vmfiles.py" "$REPO_DIR" "$STAGE/tree"
+
 echo "==> Shipping vm-files to admin@$VM_HOST"
-tar -C "$REPO_DIR/vm-files" -cf - etc home usr \
+tar -C "$STAGE/tree" -cf - etc home usr \
     | ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" '
         set -eu
         rm -rf /tmp/vmfiles && mkdir -p /tmp/vmfiles

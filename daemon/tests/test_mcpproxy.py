@@ -623,6 +623,35 @@ class FakeHttpSession:
         return None
 
 
+class RecordingSession(FakeHttpSession):
+    """Remembers the extra keyword arguments each POST was made with."""
+
+    def __init__(self) -> None:
+        super().__init__(200)
+        self.kwargs: list[dict] = []
+
+    def post(self, url, json=None, headers=None, **kwargs):  # noqa: ANN001, ARG002
+        self.kwargs.append(kwargs)
+        return FakeHttpResponse(202)
+
+
+async def test_proxy_setting() -> None:
+    print("\n[6b] a server's `proxy` reaches the upstream POST, and only that server's")
+    note = {"jsonrpc": "2.0", "method": "notifications/initialized"}
+    for label, proxy, expected in (
+        ("with a proxy set, aiohttp is given it", "http://proxy.example:8888",
+         {"proxy": "http://proxy.example:8888"}),
+        ("with none set, no proxy argument is passed at all", "", {}),
+    ):
+        session = RecordingSession()
+        upstream = HttpUpstream(
+            Server(name="s", type="http", url="http://fake/mcp", proxy=proxy),
+            {}, session=session)
+        await upstream.start()
+        await upstream.send(note)
+        check(label, session.kwargs == [expected], session.kwargs)
+
+
 async def test_upstream_failures() -> None:
     print("\n[7] a broken upstream is distinguishable from a genuinely empty one")
 
@@ -814,6 +843,7 @@ async def main() -> int:
     await test_runtime_policy()
     await test_oauth()
     await test_command()
+    await test_proxy_setting()
     await test_upstream_failures()
     await test_tool_cache()
     print()

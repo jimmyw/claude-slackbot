@@ -49,7 +49,7 @@ DEFAULT_MAX_RESULT_BYTES = 256 * 1024
 
 _SERVER_KEYS = {
     "type", "url", "command", "args", "credential", "tools",
-    "max_calls_per_run", "max_result_bytes", "description",
+    "max_calls_per_run", "max_result_bytes", "description", "proxy",
 }
 _CREDENTIAL_KEYS = {"mode", "headers", "env", "oauth", "users", "shared_fallback"}
 _TOOLS_KEYS = {"allow", "deny", "users"}
@@ -81,6 +81,10 @@ class Server:
     command: str = ""
     args: tuple[str, ...] = ()
     description: str = ""
+    # Forward proxy for an http upstream, e.g. one on a network the upstream's access
+    # policy trusts. TLS is tunnelled with CONNECT, so the proxy sees the destination but
+    # not the credential.
+    proxy: str = ""
     mode: str = MODE_SHARED
     shared_fallback: bool = False
     shared: Credential = field(default_factory=Credential)
@@ -218,6 +222,15 @@ def parse_server(name: str, raw: Any) -> Server:
     if transport == STDIO and not isinstance(raw.get("command"), str):
         raise McpConfigError(f"server {name!r} is stdio and needs a command")
 
+    proxy = raw.get("proxy") or ""
+    if proxy:
+        if transport != HTTP:
+            raise McpConfigError(f"server {name!r}: proxy only applies to http servers")
+        if not isinstance(proxy, str) or not proxy.startswith(("http://", "https://")):
+            raise McpConfigError(
+                f"server {name!r}: proxy must be an http:// or https:// URL"
+            )
+
     args = raw.get("args") or []
     if not isinstance(args, list) or any(not isinstance(a, str) for a in args):
         raise McpConfigError(f"server {name!r}: args must be a list of strings")
@@ -269,6 +282,7 @@ def parse_server(name: str, raw: Any) -> Server:
         command=raw.get("command") or "",
         args=tuple(args),
         description=raw.get("description") or "",
+        proxy=proxy,
         mode=mode,
         shared_fallback=bool(cred_raw.get("shared_fallback")),
         shared=shared,

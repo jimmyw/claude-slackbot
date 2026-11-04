@@ -1,0 +1,3 @@
+# Copy to bootstrap/operator-keys.pub (gitignored) and add your own public keys, one per
+# line. They are installed on the guest's `admin` account only -- never on `agent`.
+# ssh-ed25519 AAAA... you@your-host

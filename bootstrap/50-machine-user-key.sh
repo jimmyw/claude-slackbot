@@ -88,7 +88,7 @@ echo "Add this to the MACHINE USER's GitHub account:"
 echo "  https://github.com/settings/keys  (logged in as the machine user)"
 echo
 echo "Then give that account read-only access to the repos:"
-echo "  example org -> Teams -> a read-only team, or per-repo Read permission"
+echo "  your GitHub org -> Teams -> a read-only team, or per-repo Read permission"
 echo "============================================================"
 cat "$KEY.pub"
 echo "============================================================"

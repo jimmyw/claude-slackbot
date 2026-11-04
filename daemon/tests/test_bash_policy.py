@@ -59,7 +59,7 @@ def main() -> int:
         "rm -rf build",                       # inside the workspace
         "mv src/a.c src/b.c",                 # relative, inside
         "echo done > /home/agent/work/log",
-        "curl -s https://api.github.com/repos/example/x",
+        "curl -s https://api.github.com/repos/example-org/x",
         "wget -qO- https://example.com/spec.json",
         "git commit -am 'docs: overview'",
         "git checkout -b docs-branch",

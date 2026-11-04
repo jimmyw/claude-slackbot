@@ -463,10 +463,13 @@ class HttpUpstream(Upstream):
 
     async def _post(self, message: dict, *, retry_auth: bool = True) -> None:
         assert self._session is not None
+        # Only passed when set, so every server without a proxy behaves exactly as before.
+        extra = {"proxy": self._server.proxy} if self._server.proxy else {}
         async with self._session.post(
             self._server.url,
             json=message,
             headers=await self._request_headers(force_auth=not retry_auth),
+            **extra,
         ) as response:
             if response.status == 401 and retry_auth and self._auth is not None:
                 # One retry: an access token can expire mid-session, and the provider

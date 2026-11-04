@@ -1,6 +1,6 @@
 [Unit]
 Description=ssh-agent holding the GitHub machine-user key for the agent VM
-Documentation=file:///home/example/slackbot/README.md
+Documentation=file://%h/slackbot/README.md
 # The daemon forwards this agent into the guest, so it must be up first.
 Before=slack-claude-daemon.service
 
@@ -10,11 +10,11 @@ Type=exec
 # PrivateTmp=yes, which gives each of them a *different* private /tmp, so a socket
 # there would be invisible to the daemon. This directory is the one path the
 # daemon's ProtectSystem=strict sandbox is granted write access to.
-Environment=SSH_AUTH_SOCK=/home/example/.local/share/slack-claude/ssh-agent.sock
-ExecStartPre=-/usr/bin/rm -f /home/example/.local/share/slack-claude/ssh-agent.sock
-ExecStart=/usr/bin/ssh-agent -D -a /home/example/.local/share/slack-claude/ssh-agent.sock
+Environment=SSH_AUTH_SOCK=%h/.local/share/slack-claude/ssh-agent.sock
+ExecStartPre=-/usr/bin/rm -f %h/.local/share/slack-claude/ssh-agent.sock
+ExecStart=/usr/bin/ssh-agent -D -a %h/.local/share/slack-claude/ssh-agent.sock
 # Load the key with its destination constraint once the socket exists.
-ExecStartPost=/home/example/slackbot/bootstrap/load-agent-key.sh
+ExecStartPost=%h/slackbot/bootstrap/load-agent-key.sh
 Restart=always
 RestartSec=5
 
@@ -22,10 +22,10 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/home/example/.local/share/slack-claude
+ReadWritePaths=%h/.local/share/slack-claude
 
-StandardOutput=append:/home/example/.local/share/slack-claude/ssh-agent.log
-StandardError=append:/home/example/.local/share/slack-claude/ssh-agent.log
+StandardOutput=append:%h/.local/share/slack-claude/ssh-agent.log
+StandardError=append:%h/.local/share/slack-claude/ssh-agent.log
 SyslogIdentifier=slack-claude-ssh-agent
 
 [Install]

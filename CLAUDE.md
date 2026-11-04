@@ -68,15 +68,14 @@ sessions.
 
 ## Still open
 
-- **Replace `operator`'s key with a read-only machine user.** Forwarding is
+- **Replace the operator's personal GitHub key with a read-only machine user.** Forwarding is
   unconstrained, so the account is the entire security model; right now the guest
   can push to anything the operator can write during a run.
 - Whether the agent should ever push. The guest CLAUDE.md tells it not to try,
   but with a personal key forwarded it currently could. Its git identity is set
   (`agent-vm (Claude Code) <operator@example.com>`) so local commits are clean.
 - **Tailscale in the guest voids the egress guarantee.** As of 2026-08-13 the VM
-  is on the tailnet as `agent-vm` (100.64.0.2) and can reach `example-host` via
-  DERP. nftables cannot see inside WireGuard, so `20-nftables-egress.sh` is no
+  is on the operator's tailnet as `agent-vm` and can reach another peer via DERP. nftables cannot see inside WireGuard, so `20-nftables-egress.sh` is no
   longer the control for tailnet destinations — tailnet ACLs are. terra itself is
   not a peer on that tailnet, so LAN-deny still holds for terra and 192.168.x.
   `verify-egress.sh` now FAILS loudly when it finds tailscaled running rather
@@ -117,7 +116,7 @@ sessions.
   the window exists for as long as the files are edited in place under the unit's
   `WorkingDirectory`. Restart before trying a new command, not after.
 - **There are two `.env` files and only one is read.** The unit's `EnvironmentFile`
-  is `daemon/.env`; `/home/example/slackbot/.env` is an older copy that nothing
+  is `daemon/.env`; `<repo>/.env` is an older copy that nothing
   loads. They currently agree on `AUTHORIZED_USER_ID` and `DB_PATH`, which is the
   only reason editing the wrong one has not yet cost anything.
 
@@ -326,8 +325,8 @@ until this existed a rebuilt upstream or a revoked grant meant hand-editing
 The three servers now run through the host proxy; the VM holds nothing. Four things
 were not in the plan:
 
-- **There was a FOURTH credential.** `varys` authenticates to `varys.example.com` via
-  SSO and caches its session cookies in `~/.config/example-varys/session.json` — not in
+- **There was a FOURTH credential.** `varys` authenticates to its upstream via
+  an SSO login and caches its session cookies in `~/.config/<server>/session.json` — not in
   `.claude.json` at all, so no amount of reading the MCP config would have found it.
   Its `env` block was empty, which is what gave it away. Copied to the host at the same
   path (the daemon runs as its own user, so `Path.home()` resolves) and removed from the
@@ -337,7 +336,7 @@ were not in the plan:
   `authorizationServerUrl` and `oauthMetadataFound`, nothing more, so the migration
   writes `token_url` empty and says so. Fetch it from
   `<server>/.well-known/oauth-authorization-server` — for esp-crash that is
-  `https://example.net/token`, `grant_types_supported` including
+  `https://<host>/token`, `grant_types_supported` including
   `refresh_token`.
 - **Without `token_url` the HTTP upstream sends NO Authorization header at all** and the
   upstream answers 401, which reads like an expired credential rather than a missing
@@ -454,7 +453,7 @@ Per thread, in `thread_modes`: `active` (default), `silent` (`|silent`), `paused
 
 ## Bot identity
 
-- Taken from `auth_test` at startup (`testbot`, `U0BOTBOT001`) and passed to the CLI
+- Taken from `auth_test` at startup (a handle and id such as `mybot`, `U0123ABCDEF`) and passed to the CLI
   as `--append-system-prompt`, never hardcoded — the handle can change, and a guest
   file that lies about it is worse than one that says nothing.
 - **The system prompt, not the first turn.** Keying it off `session.is_new` would
@@ -762,8 +761,8 @@ Checked against Claude Code 2.1.231 on terra:
   Validate also rejects the unedited `.env.example` placeholders, because they are
   non-empty and correctly shaped, so the first symptom otherwise is an
   `invalid_auth` traceback from Slack.
-- **`journalctl --user` does not work for example on terra**: `/var/log/journal` is
-  `root:systemd-journal` and example is not in that group. The unit therefore also
+- **`journalctl --user` may not work for the operator on the host**: `/var/log/journal`
+  is `root:systemd-journal` and the operator is not in that group. The unit therefore also
   appends to `~/.local/share/slack-claude/daemon.log`, which is inside the one
   directory `ReadWritePaths` grants.
 - **Never let a heredoc and a pipe both feed one ssh stdin.** In
@@ -841,10 +840,10 @@ Checked against Claude Code 2.1.231 on terra:
   without `--recurse-submodules` leaves real-looking but contentless components,
   so the agent reads the tree as complete and documents it wrongly — silently.
   `add-repo.sh` now counts them and warns with the list of repos required.
-  `example-firmware-repo` has 6 submodules across 6 distinct private repos.
+  One firmware repo had 6 submodules across 6 distinct private repos.
 - **Deploy keys do not scale to submodules.** GitHub allows one deploy key per
   repo, so an N-submodule tree needs N+1 keys *plus* `url.insteadOf` rewriting to
-  map each `git@github.com:example/X` to the right Host alias. A single credential
+  map each `git@github.com:<org>/X` to the right Host alias. A single credential
   with read access to all of them (fine-grained PAT, or a machine user) is the
   right tool once submodules are involved.
 - **`/home/agent` was `drwx------ agent:agent`** and is now `0711` with `work/` at
@@ -889,10 +888,9 @@ Checked against Claude Code 2.1.231 on terra:
 - **A forward-hook-only firewall does NOT contain the guest.** Traffic from the
   guest to one of the *host's own* addresses is host-local and hits the **input**
   hook, so a forward-only ruleset misses it entirely. Measured on terra with just
-  the forward chain: forwarded LAN destinations (192.168.1.1, 192.168.2.1,
-  10.0.0.1) were correctly blocked, but the guest could still reach
-  `192.168.1.10` (terra's LAN IP) and its `tcp/22`, the VLAN address
-  `192.168.20.200`, and terra's **tailscale0 address** — a route toward the whole
+  the forward chain: forwarded LAN destinations (the router and other
+  subnets) were correctly blocked, but the guest could still reach the host's own LAN
+  IP and its `tcp/22`, its VLAN address, and its **tailscale0 address** — a route toward the whole
   tailnet. The partial success is what makes this easy to miss. `agentvm` now has
   an `input` chain allowing only DNS/DHCP to the gateway and dropping the rest.
   `bootstrap/verify-egress.sh` checks both properties, discovering the host's

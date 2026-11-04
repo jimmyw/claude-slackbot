@@ -212,17 +212,23 @@ for path, key in (
         json.dump(document, handle, indent=2)
     print(f"    {path}: removed {key}")
 PY
-    # A stdio MCP server can also cache its own credential OUTSIDE .claude.json --
-    # varys keeps an SSO session under ~/.config/example-varys, which is a fourth
-    # credential the first pass of this migration did not know about. Copy it to the
-    # host first (same path, since the daemon runs as its own user) or the server
-    # cannot authenticate once it runs out here.
-    ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" \
-        'sudo rm -rf /home/agent/.config/example-varys' </dev/null || true
-    echo "    removed the guest's cached varys SSO session"
+    # A stdio MCP server can also cache its own credential OUTSIDE .claude.json, e.g. a
+    # login session under ~/.config/<server>. Reading the MCP config will never reveal
+    # it, so name any such paths in GUEST_CREDENTIAL_PATHS (space-separated, absolute,
+    # under /home/agent/). Copy each to the host first (same path, since the daemon runs
+    # as its own user) or the server cannot authenticate once it runs out here.
+    for cache_path in ${GUEST_CREDENTIAL_PATHS:-}; do
+        case "$cache_path" in
+            /home/agent/?*) ;;
+            *) echo "    refusing GUEST_CREDENTIAL_PATHS entry outside /home/agent: $cache_path" >&2; continue ;;
+        esac
+        case "$cache_path" in *..*) echo "    refusing path containing '..': $cache_path" >&2; continue ;; esac
+        ssh "${SSH_OPTS[@]}" "admin@$VM_HOST" "sudo rm -rf -- '$cache_path'" </dev/null || true
+        echo "    removed the guest's cached credential at $cache_path"
+    done
     echo "    Now rotate the upstream credentials: the guest's copies existed, so"
-    echo "    treat them as exposed. Reissue the syslog cookie, re-authorise"
-    echo "    esp-crash on the host, and roll the varys token."
+    echo "    treat them as exposed: reissue any cookie or token, and re-authorise any"
+    echo "    OAuth grant on the host."
     echo
     echo "==> Verifying"
     "$REPO_DIR/bootstrap/verify-guest.sh" "$VM_HOST" || true

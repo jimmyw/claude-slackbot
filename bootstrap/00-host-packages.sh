@@ -3,7 +3,7 @@
 #
 # Run this yourself:   sudo ./bootstrap/00-host-packages.sh
 #
-# Everything here needs root. After it completes, the `example` user can drive
+# Everything here needs root. After it completes, the unprivileged operator user can drive
 # libvirt directly and the daemon's --user unit survives reboot, so the rest of
 # the provisioning runs unprivileged.
 set -euo pipefail
@@ -13,7 +13,12 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-TARGET_USER="${TARGET_USER:-example}"
+# The unprivileged user who will run the daemon: whoever invoked sudo, unless overridden.
+TARGET_USER="${TARGET_USER:-${SUDO_USER:-}}"
+if [[ -z "$TARGET_USER" || "$TARGET_USER" == root ]]; then
+    echo "set TARGET_USER to the unprivileged user that will run the daemon" >&2
+    exit 64
+fi
 
 echo "==> Installing packages"
 # qemu-base pulls qemu-img, qemu-common, qemu-system-x86 and virtiofsd.

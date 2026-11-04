@@ -58,8 +58,8 @@ table inet agentvm {
         # Traffic from the guest to one of the HOST's own addresses is host-local:
         # it hits the input hook, not forward, so the chain above never sees it.
         # Without this chain the guest could reach every service on terra —
-        # measured on this box: sshd on 192.168.1.10:22, the VLAN address
-        # 192.168.20.200, and terra's tailscale0 address, which is a route toward
+        # measured on the host: its sshd on its own LAN IP, its VLAN address, and its
+        # tailscale0 address, which is a route toward
         # the whole tailnet. Forwarded LAN destinations were correctly blocked,
         # which is exactly what made the gap easy to miss.
         type filter hook input priority -10; policy accept;

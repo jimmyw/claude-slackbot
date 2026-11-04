@@ -20,3 +20,9 @@ id_*
 *.egg-info/
 build/
 dist/
+
+# Operator-specific, never committed: the agent's project context and notes
+# (see bootstrap/vmfiles.py), local-only instructions, and the operator's own SSH keys.
+vm-files.local/
+CLAUDE.local.md
+bootstrap/operator-keys.pub

@@ -138,7 +138,7 @@ async def run_agent_exec(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={
-            "PATH": f"/home/example/.local/bin:/usr/bin:/bin",
+            "PATH": f"{Path.home()}/.local/bin:/usr/bin:/bin",
             "HOME": str(Path.home()),
             "AGENT_SETTINGS": str(settings),
         },
