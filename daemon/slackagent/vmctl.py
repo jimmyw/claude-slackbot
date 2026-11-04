@@ -36,11 +36,25 @@ class VmControl:
         return await self.state() == "running"
 
     async def start(self) -> bool:
-        if await self.is_running():
+        """Bring the domain to running: `start` if it is off, `resume` if paused.
+
+        A paused domain is active, so `virsh start` refuses it with "Domain is
+        already active" — the daemon used to report that as a failed start and
+        could never recover from a pause (libvirt pauses a guest on an I/O error
+        such as a briefly full host disk).
+        """
+        state = await self.state()
+        if state == "running":
             return True
-        code, _, err = await self._virsh("start", self._domain)
+        if state == "paused":
+            reason = await self._virsh("domstate", "--reason", self._domain)
+            log.warning("%s is paused (%s); resuming", self._domain, reason[1].strip())
+            verb = "resume"
+        else:
+            verb = "start"
+        code, _, err = await self._virsh(verb, self._domain)
         if code != 0:
-            log.error("could not start %s: %s", self._domain, err.strip())
+            log.error("could not %s %s: %s", verb, self._domain, err.strip())
             return False
         return True
 

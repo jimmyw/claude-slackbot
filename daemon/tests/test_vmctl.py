@@ -84,6 +84,13 @@ async def main() -> int:
         check("start() pins the URI on the start call",
               len(captured) == 2 and "qemu:///system" in captured[1], captured)
 
+        captured.clear()
+        patch_virsh(stdout=b"paused\n")
+        await VmControl("agent-vm").start()
+        check("a paused domain is resumed, not started",
+              any("resume" in c for c in captured)
+              and not any("start" in c for c in captured), captured)
+
         print("\n[2] an explicit override is honoured")
         captured.clear()
         patch_virsh()
